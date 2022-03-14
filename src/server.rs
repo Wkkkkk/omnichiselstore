@@ -92,6 +92,7 @@ struct Store<T: StoreTransport + Send + Sync> {
     pending_transitions: Vec<StoreCommand>,
     command_completions: HashMap<u64, Arc<Notify>>,
     results: HashMap<u64, Result<QueryResults, StoreError>>,
+    halt: bool,
 }
 
 impl<T: StoreTransport + Send + Sync> Store<T> {
@@ -123,6 +124,7 @@ impl<T: StoreTransport + Send + Sync> Store<T> {
             pending_transitions: Vec::new(),
             command_completions: HashMap::new(),
             results: HashMap::new(),
+            halt: false,
         }
     }
 
@@ -138,6 +140,10 @@ impl<T: StoreTransport + Send + Sync> Store<T> {
         let conn = &self.conn_pool[idx];
         self.conn_idx += 1;
         conn.clone()
+    }
+
+    pub fn set_halt(&mut self, halt: bool) {
+        self.halt = halt;
     }
 }
 
@@ -209,7 +215,7 @@ impl<T: StoreTransport + Send + Sync> Cluster<StoreCommand> for Store<T> {
     }
 
     fn halt(&self) -> bool {
-        false
+        self.halt
     }
 }
 
@@ -382,6 +388,12 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         let mut cluster = self.store.lock().unwrap();
         cluster.pending_messages.push(msg);
         self.message_notifier_tx.send(()).unwrap();
+    }
+
+    /// Used to shutdown replica
+    pub fn set_halt(&self, halt: bool) {
+        let mut cluster = self.store.lock().unwrap();
+        cluster.set_halt(halt);
     }
 }
 
