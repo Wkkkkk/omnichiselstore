@@ -6,6 +6,16 @@ use chiselstore::{
 use std::sync::Arc;
 use tonic::transport::Server;
 
+extern crate futures;
+use crate::futures::FutureExt;
+
+pub mod proto {
+  tonic::include_proto!("proto");
+}
+use proto::rpc_client::RpcClient;
+use proto::{Consistency, Query};
+use tokio::sync::oneshot;
+
 /// Node authority (host and port) in the cluster.
 fn node_authority(id: usize) -> (&'static str, u16) {
     let host = "127.0.0.1";
@@ -19,11 +29,24 @@ fn node_rpc_addr(id: usize) -> String {
     format!("http://{}:{}", host, port)
 }
 
-extern crate futures;
+struct Replica {
+  pub store_handle: tokio::task::JoinHandle<()>,
+  pub rpc_handle: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+  pub halt_sender: tokio::sync::oneshot::Sender<()>,
+  pub shutdown_sender: tokio::sync::oneshot::Sender<()>,
+}
 
-use crate::futures::FutureExt;
+impl Replica {
+    pub async fn shutdown(self) {
+        self.shutdown_sender.send(());
+        self.rpc_handle.await.unwrap();
 
-async fn start_server(id: usize, peers: Vec<usize>) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<Result<(), tonic::transport::Error>>, tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Sender<()>) {
+        self.halt_sender.send(());
+        self.store_handle.await.unwrap();
+    }
+}
+
+async fn start_replica(id: usize, peers: Vec<usize>) -> Replica {
   let (host, port) = node_authority(id);
   let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
   let transport = RpcTransport::new(Box::new(node_rpc_addr));
@@ -46,64 +69,78 @@ async fn start_server(id: usize, peers: Vec<usize>) -> (tokio::task::JoinHandle<
     })
   };
   let rpc = RpcService::new(server);
-  let (shtdwn_sender, shtdwn_receiver) = oneshot::channel::<()>();
+  let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
   let rpc_handle = tokio::task::spawn(async move {
       println!("RPC listening to {} ...", rpc_listen_addr);
       let ret = Server::builder()
           .add_service(RpcServer::new(rpc))
-          .serve_with_shutdown(rpc_listen_addr, shtdwn_receiver.map(drop))
+          .serve_with_shutdown(rpc_listen_addr, shutdown_receiver.map(drop))
           .await;
       println!("RPC Server shutting down...");
       ret
   });
 
-  return (store_handle, rpc_handle, halt_sender, shtdwn_sender)
+  return Replica {
+    store_handle,
+    rpc_handle,
+    halt_sender,
+    shutdown_sender,
+  }
 }
 
-pub mod proto {
-  tonic::include_proto!("proto");
+async fn setup_replicas(num_replicas: usize) -> Vec<Replica> {
+    let mut replicas: Vec<Replica> = Vec::new();
+    for id in 1..(num_replicas+1) {
+        let mut p1: Vec<usize> = (1..id).collect();
+        let mut p2: Vec<usize> = (id..num_replicas+1).collect();
+        
+        p1.append(&mut p2);
+        let peers = p1;
+
+        replicas.push(start_replica(id, peers).await);
+    }
+
+    return replicas
 }
-use proto::rpc_client::RpcClient;
-use proto::{Consistency, Query};
-use tokio::sync::oneshot;
+
+async fn shutdown_replicas(mut replicas: Vec<Replica>) {
+    while let Some(r) = replicas.pop() {
+        r.shutdown().await;
+    }
+}
+
+use std::error::Error;
+async fn query(replica_id: usize, sql: String) -> Result<String, Box<dyn Error>> {
+    // create RPC client
+    let addr = node_rpc_addr(replica_id);
+    let mut client = RpcClient::connect(addr).await.unwrap();
+    
+    // create request
+    let query = tonic::Request::new(Query {
+        sql: sql,
+        consistency: Consistency::Strong as i32,
+    });
+
+    // execute request
+    let response = client.execute(query).await.unwrap();
+    let response = response.into_inner();
+    let res = response.rows[0].values[0].clone();
+
+    Ok(res)
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn connect_to_cluster() {
-  let (sh1, rh1, hs1, ss1) = start_server(1, vec![2]).await;
-  let (sh2, rh2, hs2, ss2) = start_server(2, vec![1]).await;
+    let mut replicas = setup_replicas(2).await;
 
-  let write_thread = tokio::task::spawn(async {
-    
-    let addr = "http://127.0.0.1:50001";
-    let mut client = RpcClient::connect(addr).await.unwrap();
-    
-    let query = tonic::Request::new(Query {
-      sql: String::from("SELECT 1+1;"),
-      consistency: Consistency::Strong as i32,
-    });
-    let response = client.execute(query).await.unwrap();
-    let response = response.into_inner();
+    // run test
+    tokio::task::spawn(async {
+        let res = query(1, String::from("SELECT 1+1;")).await.unwrap();
 
-    return response.rows[0].values[0].clone();
-  });
+        assert!(res == "2");
+    }).await.unwrap();
 
-  let res = write_thread.await.unwrap();
-
-  assert!(res == "2");
-
-  // shut down servers
-  ss1.send(());
-  rh1.await.unwrap();
-  ss2.send(());
-  rh2.await.unwrap();
-  
-  hs1.send(());
-  sh1.await.unwrap();
-  hs2.send(());
-  sh2.await.unwrap();
-  
-
-  return;
+    shutdown_replicas(replicas).await;
 }
 
 #[test]
