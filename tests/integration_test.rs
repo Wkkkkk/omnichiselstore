@@ -124,6 +124,10 @@ async fn query(replica_id: usize, sql: String) -> Result<String, Box<dyn Error>>
     // execute request
     let response = client.execute(query).await.unwrap();
     let response = response.into_inner();
+    if response.rows.len() == 0 || response.rows[0].values.len() == 0 {
+        return Ok(String::from(""));
+    }
+
     let res = response.rows[0].values[0].clone();
 
     Ok(res)
@@ -143,18 +147,41 @@ async fn connect_to_cluster() {
     shutdown_replicas(replicas).await;
 }
 
-#[test]
-fn single_write_single_read() {
+#[tokio::test(flavor = "multi_thread")]
+async fn single_write_single_read() {
+    // create 2 replicas
+    let mut replicas = setup_replicas(2).await;
+
+    // run test
+    tokio::task::spawn(async {
+        // create table
+        query(1, String::from("CREATE TABLE IF NOT EXISTS test (id integer PRIMARY KEY)")).await.unwrap();
+
+        // create new entry
+        query(1, String::from("INSERT INTO test VALUES(1)")).await.unwrap();
+
+        // read new entry from replica 1
+        let res = query(1, String::from("SELECT id FROM test WHERE id = 1")).await.unwrap();
+        assert!(res == "1");
+        
+        // read new entry from replica 2
+        let res = query(2, String::from("SELECT id FROM test WHERE id = 1")).await.unwrap();
+        assert!(res == "1");
+
+        // drop table
+        query(1, String::from("DROP TABLE test")).await.unwrap();
+    }).await.unwrap();
+
+    shutdown_replicas(replicas).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_write_multi_read() {
   
 }
 
-#[test]
-fn single_write_multi_read() {
-  
-}
-
-#[test]
-fn multi_write_single_read() {
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_write_single_read() {
   // ChiselStore uses SQLite which only allows for single sequential writes
 
 }
