@@ -23,23 +23,31 @@ extern crate futures;
 
 use crate::futures::FutureExt;
 
-async fn start_server(id: usize, peers: Vec<usize>) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<Result<(), tonic::transport::Error>>, tokio::sync::oneshot::Sender<()>) {
+async fn start_server(id: usize, peers: Vec<usize>) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<Result<(), tonic::transport::Error>>, tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Sender<()>) {
   let (host, port) = node_authority(id);
   let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
   let transport = RpcTransport::new(Box::new(node_rpc_addr));
   let server = StoreServer::start(id, peers, transport).unwrap();
   let server = Arc::new(server);
-  let f = {
-      let server = server.clone();
-      tokio::task::spawn_blocking(move || {
-          println!("ChiselStore node starting..");
-          server.run();
-          println!("ChiselStore node shutting down..");
-      })
+  let (halt_sender, halt_receiver) = oneshot::channel::<()>();
+  let store_handle = {
+    let server = server.clone();
+    let s = server.clone();
+    tokio::task::spawn(async move {
+      match halt_receiver.await {
+        Ok(_) => s.set_halt(true),
+        Err(_) => println!("Received error in halt_receiver"),
+      };
+    });
+    tokio::task::spawn(async move {
+      println!("ChiselStore node starting..");
+      server.run();
+      println!("ChiselStore node shutting down..");
+    })
   };
   let rpc = RpcService::new(server);
   let (shtdwn_sender, shtdwn_receiver) = oneshot::channel::<()>();
-  let g = tokio::task::spawn(async move {
+  let rpc_handle = tokio::task::spawn(async move {
       println!("RPC listening to {} ...", rpc_listen_addr);
       let ret = Server::builder()
           .add_service(RpcServer::new(rpc))
@@ -49,7 +57,7 @@ async fn start_server(id: usize, peers: Vec<usize>) -> (tokio::task::JoinHandle<
       ret
   });
 
-  return (f, g, shtdwn_sender)
+  return (store_handle, rpc_handle, halt_sender, shtdwn_sender)
 }
 
 pub mod proto {
@@ -60,9 +68,9 @@ use proto::{Consistency, Query};
 use tokio::sync::oneshot;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn single_write_single_read() {
-  let (f1, g1, s1) = start_server(1, vec![2]).await;
-  let (f2, g2, s2) = start_server(2, vec![1]).await;
+async fn connect_to_cluster() {
+  let (sh1, rh1, hs1, ss1) = start_server(1, vec![2]).await;
+  let (sh2, rh2, hs2, ss2) = start_server(2, vec![1]).await;
 
   let write_thread = tokio::task::spawn(async {
     
@@ -84,15 +92,23 @@ async fn single_write_single_read() {
   assert!(res == "2");
 
   // shut down servers
-  f1.abort();
-  g1.abort();
-  s1.send(());
-
-  f2.abort();
-  g2.abort();
-  s2.send(());
+  ss1.send(());
+  rh1.await.unwrap();
+  ss2.send(());
+  rh2.await.unwrap();
+  
+  hs1.send(());
+  sh1.await.unwrap();
+  hs2.send(());
+  sh2.await.unwrap();
+  
 
   return;
+}
+
+#[test]
+fn single_write_single_read() {
+  
 }
 
 #[test]
