@@ -30,10 +30,11 @@ fn node_rpc_addr(id: usize) -> String {
 }
 
 struct Replica {
-  pub store_handle: tokio::task::JoinHandle<()>,
-  pub rpc_handle: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
-  pub halt_sender: tokio::sync::oneshot::Sender<()>,
-  pub shutdown_sender: tokio::sync::oneshot::Sender<()>,
+    store_server: std::sync::Arc<StoreServer<RpcTransport>>,
+    store_handle: tokio::task::JoinHandle<()>,
+    rpc_handle: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    halt_sender: tokio::sync::oneshot::Sender<()>,
+    shutdown_sender: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Replica {
@@ -44,48 +45,60 @@ impl Replica {
         self.halt_sender.send(());
         self.store_handle.await.unwrap();
     }
+
+    pub fn is_leader(&self) -> bool {
+        self.store_server.is_leader()
+    }
+
+    pub fn get_id(&self) -> usize {
+        self.store_server.get_id()
+    }
 }
 
 async fn start_replica(id: usize, peers: Vec<usize>) -> Replica {
-  let (host, port) = node_authority(id);
-  let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
-  let transport = RpcTransport::new(Box::new(node_rpc_addr));
-  let server = StoreServer::start(id, peers, transport).unwrap();
-  let server = Arc::new(server);
-  let (halt_sender, halt_receiver) = oneshot::channel::<()>();
-  let store_handle = {
-    let server = server.clone();
-    let s = server.clone();
-    tokio::task::spawn(async move {
-      match halt_receiver.await {
-        Ok(_) => s.set_halt(true),
-        Err(_) => println!("Received error in halt_receiver"),
-      };
-    });
-    tokio::task::spawn(async move {
-      println!("ChiselStore node starting..");
-      server.run();
-      println!("ChiselStore node shutting down..");
-    })
-  };
-  let rpc = RpcService::new(server);
-  let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
-  let rpc_handle = tokio::task::spawn(async move {
-      println!("RPC listening to {} ...", rpc_listen_addr);
-      let ret = Server::builder()
-          .add_service(RpcServer::new(rpc))
-          .serve_with_shutdown(rpc_listen_addr, shutdown_receiver.map(drop))
-          .await;
-      println!("RPC Server shutting down...");
-      ret
-  });
+    let (host, port) = node_authority(id);
+    let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
+    let transport = RpcTransport::new(Box::new(node_rpc_addr));
+    let server = StoreServer::start(id, peers, transport).unwrap();
+    let server = Arc::new(server);
+    let (halt_sender, halt_receiver) = oneshot::channel::<()>();
+    let store_handle = {
+        let server = server.clone();
+        let s = server.clone();
+        tokio::task::spawn(async move {
+            match halt_receiver.await {
+                Ok(_) => s.set_halt(true),
+                Err(_) => println!("Received error in halt_receiver"),
+            };
+        });
+        tokio::task::spawn(async move {
+            println!("ChiselStore node starting..");
+            server.run();
+            println!("ChiselStore node shutting down..");
+        })
+    };
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
+    let rpc_handle = {
+        let server = server.clone();
+        let rpc = RpcService::new(server);
+        tokio::task::spawn(async move {
+            println!("RPC listening to {} ...", rpc_listen_addr);
+            let ret = Server::builder()
+                .add_service(RpcServer::new(rpc))
+                .serve_with_shutdown(rpc_listen_addr, shutdown_receiver.map(drop))
+                .await;
+            println!("RPC Server shutting down...");
+            ret
+        })
+    };
 
-  return Replica {
-    store_handle,
-    rpc_handle,
-    halt_sender,
-    shutdown_sender,
-  }
+    return Replica {
+        store_server: server.clone(),
+        store_handle,
+        rpc_handle,
+        halt_sender,
+        shutdown_sender,
+    }
 }
 
 async fn setup_replicas(num_replicas: usize) -> Vec<Replica> {
@@ -176,28 +189,143 @@ async fn write_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn write_write_read() {
-    /// 1. write (1,1) -> replica A
-    /// 2. (over-)write (1,2) -> replica B
-    /// 3. read (1,2) from replica A
-    /// 4. read (1,2) from replica B
-  
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn sequential_writes() {
-  // ChiselStore uses SQLite which only allows for single sequential writes
+    // ChiselStore uses SQLite which only allows for sequential writes
+    // 1. write (1,1) -> replica A
+    // 2. (over-)write (1,2) -> replica B
+    // 3. read x from replica A
+    // 4. read y from replica B
+    // 5. x == y
+  
+    // create 2 replicas
+    let mut replicas = setup_replicas(2).await;
 
+    // START: test
+
+    // create table
+    tokio::task::spawn(async {
+        query(1, String::from("CREATE TABLE IF NOT EXISTS test_sequential (id integer PRIMARY KEY, value integer NOT NULL)")).await.unwrap();
+    }).await.unwrap();
+    
+    // write replica A
+    let write_a = tokio::task::spawn(async {
+        // create new entry
+        println!("write_a");
+        query(1, String::from("INSERT OR REPLACE INTO test_sequential VALUES(1,1)")).await.unwrap();
+    });
+    
+    // write replica B
+    let write_b = tokio::task::spawn(async {
+        // create new entry
+        println!("write_b");
+        query(2, String::from("INSERT OR REPLACE INTO test_sequential VALUES(1,2)")).await.unwrap();
+    });
+    
+    write_a.await.unwrap();
+    write_b.await.unwrap();
+
+    // read new entry from replica 1
+    let x = query(1, String::from("SELECT value FROM test_sequential WHERE id = 1")).await.unwrap();
+    
+    // read new entry from replica 2
+    let y = query(2, String::from("SELECT value FROM test_sequential WHERE id = 1")).await.unwrap();
+    
+    assert!(x == y);
+
+    // END: TEST
+    
+    // drop table
+    query(1, String::from("DROP TABLE test_sequential")).await.unwrap();
+
+    shutdown_replicas(replicas).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn leader_dies() {
-  // Write to leader, kill leader, read written value from another node
+    /// Note: LittleRaft does not support changes to the cluster and will get stuck
+    // Write to cluster, kill leader, read written value from another node
+    
+    let mut replicas = setup_replicas(3).await;
 
+    // START: test
+
+    // create table
+    tokio::task::spawn(async {
+        query(1, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+    }).await.unwrap();
+    
+    // kill leader
+    let mut leader_idx = 0;
+    for (i, r) in replicas.iter().enumerate() {
+        if r.is_leader() {
+            leader_idx = i;
+            break
+        }
+    }
+
+    let leader = replicas.remove(leader_idx);
+    leader.shutdown().await;
+
+    let living_replica_id = replicas[0].get_id();
+    
+    // write to table
+    tokio::task::spawn(async move {
+        query(living_replica_id, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+    }).await.unwrap();
+
+    // END: Test
+
+    // drop table
+    let living_replica_id = replicas[0].get_id();
+
+    tokio::task::spawn(async move {
+        query(living_replica_id, String::from("DROP TABLE test_leader_drop")).await.unwrap();
+    }).await.unwrap();
+    
+    shutdown_replicas(replicas).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn follower_dies() {
-  // Write to leader, kill leader, read written value from another node
+    // Write to cluster, kill leader, read written value from another node
+    /// Note: LittleRaft does not support changes to the cluster and will get stuck
+    
+    let mut replicas = setup_replicas(3).await;
 
+    // START: test
+
+    // create table
+    tokio::task::spawn(async {
+        query(1, String::from("CREATE TABLE IF NOT EXISTS test_follower_drop (id integer PRIMARY KEY)")).await.unwrap();
+    }).await.unwrap();
+    
+    // kill leader
+    let mut follower_idx = 0;
+    for (i, r) in replicas.iter().enumerate() {
+        if !r.is_leader() {
+            follower_idx = i;
+            break
+        }
+    }
+
+    let follower = replicas.remove(follower_idx);
+    follower.shutdown().await;
+
+    let living_replica_id = replicas[0].get_id();
+    
+    // write to table
+    tokio::task::spawn(async move {
+        query(living_replica_id, String::from("CREATE TABLE IF NOT EXISTS test_follower_drop (id integer PRIMARY KEY)")).await.unwrap();
+    }).await.unwrap();
+
+    // END: Test
+
+    // drop table
+    let living_replica_id = replicas[0].get_id();
+
+    tokio::task::spawn(async move {
+        query(living_replica_id, String::from("DROP TABLE test_follower_drop")).await.unwrap();
+    }).await.unwrap();
+    
+    shutdown_replicas(replicas).await;
 }

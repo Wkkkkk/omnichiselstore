@@ -145,6 +145,10 @@ impl<T: StoreTransport + Send + Sync> Store<T> {
     pub fn set_halt(&mut self, halt: bool) {
         self.halt = halt;
     }
+
+    pub fn get_id(&self) -> usize {
+        self.this_id
+    }
 }
 
 fn query(conn: Arc<Mutex<Connection>>, sql: String) -> Result<QueryResults, StoreError> {
@@ -394,6 +398,16 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     pub fn set_halt(&self, halt: bool) {
         let mut cluster = self.store.lock().unwrap();
         cluster.set_halt(halt);
+    }
+
+    pub fn is_leader(&self) -> bool {
+        let store = self.store.lock().unwrap();
+        store.is_leader()
+    }
+
+    pub fn get_id(&self) -> usize {
+        let store = self.store.lock().unwrap();
+        store.get_id()
     }
 }
 
