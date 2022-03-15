@@ -6,17 +6,26 @@ use async_trait::async_trait;
 use crossbeam_channel as channel;
 use crossbeam_channel::{Receiver, Sender};
 use derivative::Derivative;
-use little_raft::{
-    cluster::Cluster,
-    message::Message,
-    replica::{Replica, ReplicaID},
-    state_machine::{StateMachine, StateMachineTransition, TransitionState},
-};
+// TODO: Remove
+// use little_raft::{
+//     cluster::Cluster,
+//     message::Message,
+//     replica::{Replica, ReplicaID},
+//     state_machine::{StateMachine, StateMachineTransition, TransitionState},
+// };
 use sqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use omnipaxos_core::{
+    ballot_leader_election::{BLEConfig, BallotLeaderElection, Ballot},
+    ballot_leader_election::messages::BLEMessage,
+    sequence_paxos::{CompactionErr, ReconfigurationRequest, SequencePaxos, SequencePaxosConfig, Role},
+    storage::{Storage, Snapshot, Entry},
+    util::LogEntry,
+    messages::Message,
+};
 
 /// ChiselStore transport layer.
 ///
@@ -25,26 +34,8 @@ use std::time::Duration;
 #[async_trait]
 pub trait StoreTransport {
     /// Send a store command message `msg` to `to_id` node.
-    fn send(&self, to_id: usize, msg: Message<StoreCommand>);
-
-    /// Delegate command to another node.
-    async fn delegate(
-        &self,
-        to_id: usize,
-        sql: String,
-        consistency: Consistency,
-    ) -> Result<QueryResults, StoreError>;
-}
-
-/// Consistency mode.
-#[derive(Debug)]
-pub enum Consistency {
-    /// Strong consistency. Both reads and writes go through the Raft leader,
-    /// which makes them linearizable.
-    Strong,
-    /// Relaxed reads. Reads are performed on the local node, which relaxes
-    /// read consistency and allows stale reads.
-    RelaxedReads,
+    fn send_sp(&self, to_id: usize, msg: Message<StoreCommand>);
+    fn send_ble(&self, to_id: usize, msg: BLEMessage);
 }
 
 /// Store command.
@@ -58,14 +49,6 @@ pub struct StoreCommand {
     pub sql: String,
 }
 
-impl StateMachineTransition for StoreCommand {
-    type TransitionID = usize;
-
-    fn get_id(&self) -> Self::TransitionID {
-        self.id
-    }
-}
-
 /// Store configuration.
 #[derive(Debug)]
 struct StoreConfig {
@@ -73,30 +56,34 @@ struct StoreConfig {
     conn_pool_size: usize,
 }
 
-#[derive(Derivative)]
+#[derive(Clone)]
 #[derivative(Debug)]
-struct Store<T: StoreTransport + Send + Sync> {
-    /// ID of the node this Cluster objecti s on.
+struct SQLiteStore
+{
+    /// Vector which contains all the replicated entries in-memory.
+    log: Vec<StoreCommand>,
+    /// Last promised round.
+    n_prom: Ballot,
+    /// Last accepted round.
+    acc_round: Ballot,
+    /// Length of the decided log.
+    ld: u64,
+
+    // TODO: Snapshots
+
+    /// SQLite
     this_id: usize,
-    /// Is this node the leader?
-    leader: Option<usize>,
-    leader_exists: AtomicBool,
-    waiters: Vec<Arc<Notify>>,
-    /// Pending messages
-    pending_messages: Vec<Message<StoreCommand>>,
-    /// Transport layer.
-    transport: Arc<T>,
     #[derivative(Debug = "ignore")]
     conn_pool: Vec<Arc<Mutex<Connection>>>,
     conn_idx: usize,
-    pending_transitions: Vec<StoreCommand>,
+
     command_completions: HashMap<u64, Arc<Notify>>,
     results: HashMap<u64, Result<QueryResults, StoreError>>,
-    halt: bool,
 }
 
-impl<T: StoreTransport + Send + Sync> Store<T> {
-    pub fn new(this_id: usize, transport: T, config: StoreConfig) -> Self {
+impl SQLiteStore
+{
+    pub fn new(this_id: usize, config: StoreConfig) -> Self {
         let mut conn_pool = vec![];
         let conn_pool_size = config.conn_pool_size;
         for _ in 0..conn_pool_size {
@@ -112,26 +99,18 @@ impl<T: StoreTransport + Send + Sync> Store<T> {
             conn_pool.push(Arc::new(Mutex::new(conn)));
         }
         let conn_idx = 0;
-        Store {
+        SQLiteStore {
+            log: Vec::new(),
+            n_prom: Ballot::default(),
+            acc_round: Ballot::default(),
+            ld: 0,
+
             this_id,
-            leader: None,
-            leader_exists: AtomicBool::new(false),
-            waiters: Vec::new(),
-            pending_messages: Vec::new(),
-            transport: Arc::new(transport),
             conn_pool,
             conn_idx,
-            pending_transitions: Vec::new(),
+
             command_completions: HashMap::new(),
             results: HashMap::new(),
-            halt: false,
-        }
-    }
-
-    pub fn is_leader(&self) -> bool {
-        match self.leader {
-            Some(id) => id == self.this_id,
-            _ => false,
         }
     }
 
@@ -140,14 +119,6 @@ impl<T: StoreTransport + Send + Sync> Store<T> {
         let conn = &self.conn_pool[idx];
         self.conn_idx += 1;
         conn.clone()
-    }
-
-    pub fn set_halt(&mut self, halt: bool) {
-        self.halt = halt;
-    }
-
-    pub fn get_id(&self) -> usize {
-        self.this_id
     }
 }
 
@@ -165,78 +136,92 @@ fn query(conn: Arc<Mutex<Connection>>, sql: String) -> Result<QueryResults, Stor
     Ok(QueryResults { rows })
 }
 
-impl<T: StoreTransport + Send + Sync> StateMachine<StoreCommand> for Store<T> {
-    fn register_transition_state(&mut self, transition_id: usize, state: TransitionState) {
-        if state == TransitionState::Applied {
-            if let Some(completion) = self.command_completions.remove(&(transition_id as u64)) {
+impl<S> Storage<StoreCommand, S> for SQLiteStore
+where
+    S: Snapshot<StoreCommand>,
+{
+    fn append_entry(&mut self, entry: StoreCommand) -> u64 {
+        self.log.push(entry);
+        self.get_log_len()
+    }
+
+    fn append_entries(&mut self, entries: Vec<StoreCommand>) -> u64 {
+        let mut e = entries;
+        self.log.append(&mut e);
+        self.get_log_len()
+    }
+
+    fn append_on_prefix(&mut self, from_idx: u64, entries: Vec<StoreCommand>) -> u64 {
+        self.log.truncate(from_idx as usize);
+        self.append_entries(entries)
+    }
+
+    fn set_promise(&mut self, n_prom: Ballot) {
+        self.n_prom = n_prom;
+    }
+
+    fn set_decided_idx(&mut self, ld: u64) {
+        // run queries
+        let queries_to_run = self.log[self.ld..ld];
+        for q in queries_to_run.iter() {
+            let conn = self.get_connection();
+            let results = query(conn, q.sql);
+            self.results.insert(q.id as u64, results);
+
+            if let Some(completion) = self.command_completions.remove(&(q.id as u64)) {
                 completion.notify();
             }
         }
+
+        self.ld = ld;
     }
 
-    fn apply_transition(&mut self, transition: StoreCommand) {
-        if transition.id == NOP_TRANSITION_ID {
-            return;
-        }
-        let conn = self.get_connection();
-        let results = query(conn, transition.sql);
-        if self.is_leader() {
-            self.results.insert(transition.id as u64, results);
+    fn get_decided_idx(&self) -> u64 {
+        self.ld
+    }
+
+    fn set_accepted_round(&mut self, na: Ballot) {
+        self.acc_round = na;
+    }
+
+    fn get_accepted_round(&self) -> Ballot {
+        self.acc_round
+    }
+
+    fn get_entries(&self, from: u64, to: u64) -> &[StoreCommand] {
+        self.log.get(from as usize..to as usize).unwrap_or(&[])
+    }
+
+    fn get_log_len(&self) -> u64 {
+        self.log.len() as u64
+    }
+
+    fn get_suffix(&self, from: u64) -> &[StoreCommand] {
+        match self.log.get(from as usize..) {
+            Some(s) => s,
+            None => &[],
         }
     }
 
-    fn get_pending_transitions(&mut self) -> Vec<StoreCommand> {
-        let cur = self.pending_transitions.clone();
-        self.pending_transitions = Vec::new();
-        cur
+    fn get_promise(&self) -> Ballot {
+        self.n_prom
     }
+
+    // TODO: Snapshots
 }
 
-impl<T: StoreTransport + Send + Sync> Cluster<StoreCommand> for Store<T> {
-    fn register_leader(&mut self, leader_id: Option<ReplicaID>) {
-        if let Some(id) = leader_id {
-            self.leader = Some(id);
-            self.leader_exists.store(true, Ordering::SeqCst);
-        } else {
-            self.leader = None;
-            self.leader_exists.store(false, Ordering::SeqCst);
-        }
-        let waiters = self.waiters.clone();
-        self.waiters = Vec::new();
-        for waiter in waiters {
-            waiter.notify();
-        }
-    }
-
-    fn send_message(&mut self, to_id: usize, message: Message<StoreCommand>) {
-        self.transport.send(to_id, message);
-    }
-
-    fn receive_messages(&mut self) -> Vec<Message<StoreCommand>> {
-        let cur = self.pending_messages.clone();
-        self.pending_messages = Vec::new();
-        cur
-    }
-
-    fn halt(&self) -> bool {
-        self.halt
-    }
-}
-
-type StoreReplica<T> = Replica<Store<T>, StoreCommand, Store<T>>;
-
-/// ChiselStore server.
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct StoreServer<T: StoreTransport + Send + Sync> {
+    this_id: usize,
     next_cmd_id: AtomicU64,
-    store: Arc<Mutex<Store<T>>>,
-    #[derivative(Debug = "ignore")]
-    replica: Arc<Mutex<StoreReplica<T>>>,
-    message_notifier_rx: Receiver<()>,
-    message_notifier_tx: Sender<()>,
-    transition_notifier_rx: Receiver<()>,
-    transition_notifier_tx: Sender<()>,
+    sqlite_store: Arc<Mutex<SQLiteStore>>,
+    sequence_paxos: Arc<Mutex<SequencePaxos>>,
+    ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
+    sp_notifier_rx: Receiver<Message<StoreCommand>>,
+    sp_notifier_tx: Sender<Message<StoreCommand>>,
+    ble_notifier_rx: Receiver<BLEMessage>,
+    ble_notifier_tx: Sender<BLEMessage>,
+    transport: T,
+    halt: bool,
 }
 
 /// Query row.
@@ -259,158 +244,146 @@ pub struct QueryResults {
     pub rows: Vec<QueryRow>,
 }
 
-const NOP_TRANSITION_ID: usize = 0;
-const HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(500);
-const MIN_ELECTION_TIMEOUT: Duration = Duration::from_millis(750);
-const MAX_ELECTION_TIMEOUT: Duration = Duration::from_millis(950);
-
+const HEARTBEAT_TIMEOUT: u64 = 20; // ticks until timeout
 impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Start a new server as part of a ChiselStore cluster.
     pub fn start(this_id: usize, peers: Vec<usize>, transport: T) -> Result<Self, StoreError> {
-        let config = StoreConfig { conn_pool_size: 20 };
-        let store = Arc::new(Mutex::new(Store::new(this_id, transport, config)));
-        let noop = StoreCommand {
-            id: NOP_TRANSITION_ID,
-            sql: "".to_string(),
-        };
-        let (message_notifier_tx, message_notifier_rx) = channel::unbounded();
-        let (transition_notifier_tx, transition_notifier_rx) = channel::unbounded();
-        let replica = Replica::new(
-            this_id,
-            peers,
-            store.clone(),
-            store.clone(),
-            noop,
-            HEARTBEAT_TIMEOUT,
-            (MIN_ELECTION_TIMEOUT, MAX_ELECTION_TIMEOUT),
-        );
-        let replica = Arc::new(Mutex::new(replica));
+        // sequence paxos
+        let configuration_id = 1;
+
+        let mut sp_config = SequencePaxosConfig::default();
+        sp_config.set_configuration_id(configuration_id);
+        sp_config.set_pid(this_id);
+        sp_config.set_peers(peers);
+
+        let store_config = StoreConfig { conn_pool_size: 20 };
+        let sqlite_store = Arc::new(Mutex::new(SQLiteStore::new(this_id, store_config)));
+        
+        let sp = Arc::new(Mutex::new(SequencePaxos::with(sp_config, sqlite_store.clone())));
+
+
+        // ballot leader election
+        let mut ble_config = BLEConfig::default();
+        ble_config.set_pid(this_id as u64);
+        ble_config.set_peers(peers as Vec<u64>);
+        ble_config.set_hb_delay(HEARTBEAT_TIMEOUT);
+
+        let ble = Arc::new(Mutex::new(BallotLeaderElection::with(ble_conf)));
+
+        // transport channels
+        let (sp_notifier_tx, sp_notifier_rx) = channel::unbounded();
+        let (ble_notifier_tx, ble_notifier_rx) = channel::unbounded();
+        
         Ok(StoreServer {
-            next_cmd_id: AtomicU64::new(1), // zero is reserved for no-op.
-            store,
-            replica,
-            message_notifier_rx,
-            message_notifier_tx,
-            transition_notifier_rx,
-            transition_notifier_tx,
+            this_id,
+            next_cmd_id: AtomicU64::new(0),
+            sqlite_store,
+            sequence_paxos: sp,
+            ballot_leader_election: ble,
+            sp_notifier_rx,
+            sp_notifier_tx,
+            ble_notifier_rx,
+            ble_notifier_tx,
+            transport,
+            halt: false,
         })
     }
 
     /// Run the blocking event loop.
     pub fn run(&self) {
-        self.replica.lock().unwrap().start(
-            self.message_notifier_rx.clone(),
-            self.transition_notifier_rx.clone(),
-        );
+        loop {
+            if self.halt {
+                break
+            }
+
+            let sequence_paxos = self.sequence_paxos.lock().unwrap();
+
+            if let Some(leader) = self.ballot_leader_election.tick() {
+                // a new leader is elected, pass it to SequencePaxos.
+                sequence_paxos.handle_leader(leader);
+            }
+
+            // check incoming messages
+
+            match self.sp_notifier_rx.try_recv() {
+                Ok(msg: Message<StoreCommand>) => {
+                    self.sequence_paxos.handle(msg);
+                }
+            }
+
+            match self.ble_notifier_rx.try_recv() {
+                Ok(msg: BLEMessage) => {
+                    self.ballot_leader_election.handle(msg);
+                }
+            }
+
+            // send outgoing messages
+
+            for out_msg in self.sequence_paxos.get_outgoings_msgs() {
+                let receiver = out_msg.to;
+                self.transport.send_sp(receiver, out_msg);
+            }
+
+            for out_msg in self.ballot_leader_election.get_outgoings_msgs() {
+                let receiver = out_msg.to;
+                self.transport.send_ble(receiver, out_msg);
+            }
+        }
     }
 
     /// Execute a SQL statement on the ChiselStore cluster.
     pub async fn query<S: AsRef<str>>(
         &self,
         stmt: S,
-        consistency: Consistency,
     ) -> Result<QueryResults, StoreError> {
-        // If the statement is a read statement, let's use whatever
-        // consistency the user provided; otherwise fall back to strong
-        // consistency.
-        let consistency = if is_read_statement(stmt.as_ref()) {
-            consistency
-        } else {
-            Consistency::Strong
-        };
-        let results = match consistency {
-            Consistency::Strong => {
-                self.wait_for_leader().await;
-                let (delegate, leader, transport) = {
-                    let store = self.store.lock().unwrap();
-                    (!store.is_leader(), store.leader, store.transport.clone())
+        let results = {
+            let (notify, cmd) = {
+                let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
+                let cmd = StoreCommand {
+                    id: id as usize,
+                    sql: stmt.as_ref().to_string(),
                 };
-                if delegate {
-                    if let Some(leader_id) = leader {
-                        return transport
-                            .delegate(leader_id, stmt.as_ref().to_string(), consistency)
-                            .await;
-                    }
-                    return Err(StoreError::NotLeader);
-                }
-                let (notify, id) = {
-                    let mut store = self.store.lock().unwrap();
-                    let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
-                    let cmd = StoreCommand {
-                        id: id as usize,
-                        sql: stmt.as_ref().to_string(),
-                    };
-                    let notify = Arc::new(Notify::new());
-                    store.command_completions.insert(id, notify.clone());
-                    store.pending_transitions.push(cmd);
-                    (notify, id)
-                };
-                self.transition_notifier_tx.send(()).unwrap();
-                notify.notified().await;
-                let results = self.store.lock().unwrap().results.remove(&id).unwrap();
-                results?
-            }
-            Consistency::RelaxedReads => {
-                let conn = {
-                    let mut store = self.store.lock().unwrap();
-                    store.get_connection()
-                };
-                query(conn, stmt.as_ref().to_string())?
-            }
+                
+                let notify = Arc::new(Notify::new());
+
+                let sqlite_store = self.sqlite_store.lock().unwrap();
+                sqlite_store.command_completions.insert(id, notify.clone());
+                
+                (notify, cmd)
+            };
+
+            let sequence_paxos = self.sequence_paxos.lock().unwrap();
+            sequence_paxos.append(cmd).expect("Failed to append");
+
+            // wait for append (and decide) to finish in background
+            notify.notified().await;
+            let results = self.sqlite_store.lock().unwrap().results.remove(&cmd.id).unwrap();
+            results?
         };
         Ok(results)
     }
 
-    /// Wait for a leader to be elected.
-    pub async fn wait_for_leader(&self) {
-        loop {
-            let notify = {
-                let mut store = self.store.lock().unwrap();
-                if store.leader_exists.load(Ordering::SeqCst) {
-                    break;
-                }
-                let notify = Arc::new(Notify::new());
-                store.waiters.push(notify.clone());
-                notify
-            };
-            if self
-                .store
-                .lock()
-                .unwrap()
-                .leader_exists
-                .load(Ordering::SeqCst)
-            {
-                break;
-            }
-            // TODO: add a timeout and fail if necessary
-            notify.notified().await;
-        }
+    /// Receive a sequence paxos message from the ChiselStore cluster.
+    pub fn recv_sp_msg(&self, msg: Message<StoreCommand>) {
+        self.sp_notifier_tx.send(msg).unwrap();
     }
-
-    /// Receive a message from the ChiselStore cluster.
-    pub fn recv_msg(&self, msg: little_raft::message::Message<StoreCommand>) {
-        let mut cluster = self.store.lock().unwrap();
-        cluster.pending_messages.push(msg);
-        self.message_notifier_tx.send(()).unwrap();
+    
+    /// Receive a ballot leader election message from the ChiselStore cluster.
+    pub fn recv_ble_msg(&self, msg: BLEMessage) {
+        self.ble_notifier_tx.send(msg).unwrap();
     }
 
     /// Used to shutdown replica
-    pub fn set_halt(&self, halt: bool) {
-        let mut cluster = self.store.lock().unwrap();
-        cluster.set_halt(halt);
+    pub fn set_halt(&mut self, halt: bool) {
+        self.halt = halt;
     }
 
     pub fn is_leader(&self) -> bool {
-        let store = self.store.lock().unwrap();
-        store.is_leader()
+        let sequence_paxos = self.sequence_paxos.lock().unwrap();
+        sequence_paxos.get_current_leader() == (self.this_id as u64)
     }
 
     pub fn get_id(&self) -> usize {
-        let store = self.store.lock().unwrap();
-        store.get_id()
+        self.this_id
     }
-}
-
-fn is_read_statement(stmt: &str) -> bool {
-    stmt.to_lowercase().starts_with("select")
 }
