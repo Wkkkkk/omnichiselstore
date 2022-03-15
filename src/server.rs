@@ -6,13 +6,6 @@ use async_trait::async_trait;
 use crossbeam_channel as channel;
 use crossbeam_channel::{Receiver, Sender};
 use derivative::Derivative;
-// TODO: Remove
-// use little_raft::{
-//     cluster::Cluster,
-//     message::Message,
-//     replica::{Replica, ReplicaID},
-//     state_machine::{StateMachine, StateMachineTransition, TransitionState},
-// };
 use sqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,7 +14,7 @@ use std::time::Duration;
 use omnipaxos_core::{
     ballot_leader_election::{BLEConfig, BallotLeaderElection, Ballot},
     ballot_leader_election::messages::BLEMessage,
-    sequence_paxos::{CompactionErr, ReconfigurationRequest, SequencePaxos, SequencePaxosConfig, Role},
+    sequence_paxos::{CompactionErr, ReconfigurationRequest, SequencePaxos, SequencePaxosConfig},
     storage::{Storage, Snapshot, Entry},
     util::LogEntry,
     messages::Message,
@@ -34,7 +27,7 @@ use omnipaxos_core::{
 #[async_trait]
 pub trait StoreTransport {
     /// Send a store command message `msg` to `to_id` node.
-    fn send_sp(&self, to_id: usize, msg: Message<StoreCommand>);
+    fn send_sp(&self, to_id: usize, msg: Message<StoreCommand, ()>);
     fn send_ble(&self, to_id: usize, msg: BLEMessage);
 }
 
@@ -166,6 +159,7 @@ where
         for q in queries_to_run.iter() {
             let conn = self.get_connection();
             let results = query(conn, q.sql);
+            
             self.results.insert(q.id as u64, results);
 
             if let Some(completion) = self.command_completions.remove(&(q.id as u64)) {
@@ -213,11 +207,10 @@ where
 pub struct StoreServer<T: StoreTransport + Send + Sync> {
     this_id: usize,
     next_cmd_id: AtomicU64,
-    sqlite_store: Arc<Mutex<SQLiteStore>>,
-    sequence_paxos: Arc<Mutex<SequencePaxos>>,
+    sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore>>>,
     ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
-    sp_notifier_rx: Receiver<Message<StoreCommand>>,
-    sp_notifier_tx: Sender<Message<StoreCommand>>,
+    sp_notifier_rx: Receiver<Message<StoreCommand, ()>>,
+    sp_notifier_tx: Sender<Message<StoreCommand, ()>>,
     ble_notifier_rx: Receiver<BLEMessage>,
     ble_notifier_tx: Sender<BLEMessage>,
     transport: T,
@@ -257,10 +250,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         sp_config.set_peers(peers);
 
         let store_config = StoreConfig { conn_pool_size: 20 };
-        let sqlite_store = Arc::new(Mutex::new(SQLiteStore::new(this_id, store_config)));
+        let sqlite_store = SQLiteStore::new(this_id, store_config);
         
-        let sp = Arc::new(Mutex::new(SequencePaxos::with(sp_config, sqlite_store.clone())));
-
+        let sp = Arc::new(Mutex::new(SequencePaxos::with(sp_config, sqlite_store)));
 
         // ballot leader election
         let mut ble_config = BLEConfig::default();
@@ -277,7 +269,6 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         Ok(StoreServer {
             this_id,
             next_cmd_id: AtomicU64::new(0),
-            sqlite_store,
             sequence_paxos: sp,
             ballot_leader_election: ble,
             sp_notifier_rx,
@@ -306,13 +297,13 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             // check incoming messages
 
             match self.sp_notifier_rx.try_recv() {
-                Ok(msg: Message<StoreCommand>) => {
+                Ok(msg) => {
                     self.sequence_paxos.handle(msg);
                 }
             }
 
             match self.ble_notifier_rx.try_recv() {
-                Ok(msg: BLEMessage) => {
+                Ok(msg) => {
                     self.ballot_leader_election.handle(msg);
                 }
             }
@@ -347,7 +338,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 let notify = Arc::new(Notify::new());
 
                 let sqlite_store = self.sqlite_store.lock().unwrap();
-                sqlite_store.command_completions.insert(id, notify.clone());
+                sqlite_store.command_completions.insert(id, notify.clone()); // TODO: replace with channel
                 
                 (notify, cmd)
             };
@@ -356,7 +347,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             sequence_paxos.append(cmd).expect("Failed to append");
 
             // wait for append (and decide) to finish in background
-            notify.notified().await;
+            notify.notified().await;  // TODO: replace with channel
             let results = self.sqlite_store.lock().unwrap().results.remove(&cmd.id).unwrap();
             results?
         };
@@ -364,7 +355,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     }
 
     /// Receive a sequence paxos message from the ChiselStore cluster.
-    pub fn recv_sp_msg(&self, msg: Message<StoreCommand>) {
+    pub fn recv_sp_msg(&self, msg: Message<StoreCommand, ()>) {
         self.sp_notifier_tx.send(msg).unwrap();
     }
     
