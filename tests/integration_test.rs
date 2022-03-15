@@ -148,7 +148,7 @@ async fn connect_to_cluster() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn single_write_single_read() {
+async fn write_read() {
     // create 2 replicas
     let mut replicas = setup_replicas(2).await;
 
@@ -176,12 +176,28 @@ async fn single_write_single_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn single_write_multi_read() {
+async fn write_write_read() {
+    /// 1. write (1,1) -> replica A
+    /// 2. (over-)write (1,2) -> replica B
+    /// 3. read (1,2) from replica A
+    /// 4. read (1,2) from replica B
   
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn multi_write_single_read() {
+async fn sequential_writes() {
   // ChiselStore uses SQLite which only allows for single sequential writes
+
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn leader_dies() {
+  // Write to leader, kill leader, read written value from another node
+
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn follower_dies() {
+  // Write to leader, kill leader, read written value from another node
 
 }
