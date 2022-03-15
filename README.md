@@ -1,31 +1,15 @@
-# ChiselStore
+# OmniChiselStore
 
-[![Rust](https://github.com/chiselstrike/chiselstore/actions/workflows/rust.yml/badge.svg)](https://github.com/chiselstrike/chiselstore/actions/workflows/rust.yml)
-[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+Replaces [Little Raft](https://github.com/andreev-io/little-raft) in [ChiselStore](https://github.com/chiselstrike/chiselstore) with [Omnipaxos](https://github.com/haraldng/omnipaxos).
 
-ChiselStore is an embeddable, distributed [SQLite](https://www.sqlite.org/index.html) for Rust, powered by [Little Raft](https://github.com/andreev-io/little-raft).
+## Tests
 
-SQLite is a fast and compact relational database management system, but it is limited to single-node configurations.
-ChiselStore extends SQLite to run on a cluster of machines with the [Raft consensus algorithm](https://raft.github.io).
-With ChiselStore, you get the benefits of easy-to-use, embeddable SQLite but with Raft's high availability and fault tolerance.
+Several integration tests can be found in `tests/integration_test.rs`. However, because the tests run using multiple threads and by spawning new servers in each test, to run the tests reliably each test needs to be run by itself, e.g.:
 
-For more information, check out the following [blog post](https://glaubercosta-11125.medium.com/winds-of-change-in-web-data-728187331f53).
-
-## Features
-
-* SQLite with Raft's high availability and fault tolerance
-* Strong consistency with optional relaxed reads
-* Embeddable Rust library
-
-### Roadmap
-
-* Efficient node restarts (with Raft snapshots)
-* Dynamic cluster membership (with Raft joint consensus)
-* Support executing non-deterministic SQL functions
-
-## Getting Started
-
-See the [example server](examples) of how to use the ChiselStore library.
+```zsh
+cargo test write_read -- --nocapture
+cargo test sequential_writes -- --nocapture
+```
 
 ## License
 
@@ -33,6 +17,4 @@ This project is licensed under the [MIT license](LICENSE).
 
 ### Contribution
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in ChiselStore by you, shall be licensed as MIT, without any additional
-terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in ChiselStore by you, shall be licensed as MIT, without any additional terms or conditions.
