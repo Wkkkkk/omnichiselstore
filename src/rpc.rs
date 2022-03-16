@@ -6,10 +6,18 @@ use async_mutex::Mutex;
 use async_trait::async_trait;
 use crossbeam::queue::ArrayQueue;
 use derivative::Derivative;
-use little_raft::message::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use omnipaxos_core::{
+    messages::{
+        Message, PaxosMsg, Prepare, Promise, AcceptSync, 
+        FirstAccept, AcceptDecide, Accepted, Decide, 
+        ProposalForward, Compaction, ForwardCompaction, 
+        AcceptStopSign, AcceptedStopSign, DecideStopSign,
+    },
+    util::{SyncItem}
+};
 
 #[allow(missing_docs)]
 pub mod proto {
@@ -18,8 +26,10 @@ pub mod proto {
 
 use proto::rpc_client::RpcClient;
 use proto::{
-    AppendEntriesRequest, AppendEntriesResponse, LogEntry, Query, QueryResults, QueryRow, Void,
-    VoteRequest, VoteResponse,
+    Query, QueryResults, QueryRow, Void,
+    Ballot, StopSign, PrepareReq, PromiseReq, 
+    AcceptSyncReq, FirstAcceptReq, AcceptDecideReq, AcceptedReq, 
+    DecideReq, AcceptStopSignReq, AcceptedStopSignReq, DecideStopSignReq,
 };
 
 type NodeAddrFn = dyn Fn(usize) -> String + Send + Sync;
@@ -103,7 +113,7 @@ impl RpcTransport {
 
 #[async_trait]
 impl StoreTransport for RpcTransport {
-    fn send(&self, to_id: usize, msg: Message<StoreCommand>) {
+    fn send_sp(&self, to_id: usize, msg: Message<StoreCommand, ()>) {
         match msg {
             Message::AppendEntryRequest {
                 from_id,
@@ -226,25 +236,8 @@ impl StoreTransport for RpcTransport {
         }
     }
 
-    async fn delegate(
-        &self,
-        to_id: usize,
-        sql: String,
-        consistency: Consistency,
-    ) -> Result<crate::server::QueryResults, crate::StoreError> {
-        let addr = (self.node_addr)(to_id);
-        let mut client = self.connections.connection(addr.clone()).await;
-        let query = tonic::Request::new(Query {
-            sql,
-            consistency: consistency as i32,
-        });
-        let response = client.conn.execute(query).await.unwrap();
-        let response = response.into_inner();
-        let mut rows = vec![];
-        for row in response.rows {
-            rows.push(crate::server::QueryRow { values: row.values });
-        }
-        Ok(crate::server::QueryResults { rows })
+    fn send_ble(&self, to_id: usize, msg: BLEMessage) {
+
     }
 }
 
@@ -269,119 +262,182 @@ impl Rpc for RpcService {
         request: Request<Query>,
     ) -> Result<Response<QueryResults>, tonic::Status> {
         let query = request.into_inner();
-        let consistency =
-            proto::Consistency::from_i32(query.consistency).unwrap_or(proto::Consistency::Strong);
-        let consistency = match consistency {
-            proto::Consistency::Strong => Consistency::Strong,
-            proto::Consistency::RelaxedReads => Consistency::RelaxedReads,
-        };
+        
         let server = self.server.clone();
-        let results = match server.query(query.sql, consistency).await {
+        let results = match server.query(query.sql).await {
             Ok(results) => results,
             Err(e) => return Err(Status::internal(format!("{}", e))),
         };
+
         let mut rows = vec![];
         for row in results.rows {
             rows.push(QueryRow {
                 values: row.values.clone(),
             })
         }
+
         Ok(Response::new(QueryResults { rows }))
     }
 
-    async fn vote(&self, request: Request<VoteRequest>) -> Result<Response<Void>, tonic::Status> {
+    async fn prepare(&self, request: Request<PrepareReq>) -> Result<Response<Void>, tonic::Status> {
         let msg = request.into_inner();
-        let from_id = msg.from_id as usize;
-        let term = msg.term as usize;
-        let last_log_index = msg.last_log_index as usize;
-        let last_log_term = msg.last_log_term as usize;
-        let msg = little_raft::message::Message::VoteRequest {
-            from_id,
-            term,
-            last_log_index,
-            last_log_term,
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let n_accepted = ballot_from_proto(msg.n_accepted.unwrap());
+
+        let msg = Prepare {
+            n,
+            ld: msg.ld,
+            n_accepted,
+            la: msg.la,
         };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::Prepare(msg),
+        };
+
         let server = self.server.clone();
-        server.recv_msg(msg);
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn promise(&self, request: Request<PromiseReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let n_accepted = ballot_from_proto(msg.n_accepted.unwrap());
+        
+        let mut sync_item: Option<SyncItem<StoreCommand,()>> = match msg.sync_item {
+            Some(si) => Some(sync_item_from_proto(si)),
+            _ => None,
+        };
+        
+        let ld = msg.ld;
+        let la = msg.la;
+
+        let mut stopsign: Option<omnipaxos_core::storage::StopSign> = match msg.stop_sign {
+            Some(ss) => Some(stopsign_from_proto(ss)),
+            _ => None,
+        };
+
+        let msg = Promise {
+            n,
+            n_accepted,
+            sync_item,
+            ld,
+            la,
+            stopsign,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::Promise(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
         Ok(Response::new(Void {}))
     }
 
-    async fn respond_to_vote(
-        &self,
-        request: Request<VoteResponse>,
-    ) -> Result<Response<Void>, tonic::Status> {
-        let msg = request.into_inner();
-        let from_id = msg.from_id as usize;
-        let term = msg.term as usize;
-        let vote_granted = msg.vote_granted;
-        let msg = little_raft::message::Message::VoteResponse {
-            from_id,
-            term,
-            vote_granted,
-        };
-        let server = self.server.clone();
-        server.recv_msg(msg);
-        Ok(Response::new(Void {}))
-    }
+    
 
-    async fn append_entries(
-        &self,
-        request: Request<AppendEntriesRequest>,
-    ) -> Result<Response<Void>, tonic::Status> {
-        let msg = request.into_inner();
-        let from_id = msg.from_id as usize;
-        let term = msg.term as usize;
-        let prev_log_index = msg.prev_log_index as usize;
-        let prev_log_term = msg.prev_log_term as usize;
-        let entries: Vec<little_raft::message::LogEntry<StoreCommand>> = msg
-            .entries
-            .iter()
-            .map(|entry| {
-                let id = entry.id as usize;
-                let sql = entry.sql.to_string();
-                let transition = StoreCommand { id, sql };
-                let index = entry.index as usize;
-                let term = entry.term as usize;
-                little_raft::message::LogEntry {
-                    transition,
-                    index,
-                    term,
-                }
-            })
-            .collect();
-        let commit_index = msg.commit_index as usize;
-        let msg = little_raft::message::Message::AppendEntryRequest {
-            from_id,
-            term,
-            prev_log_index,
-            prev_log_term,
-            entries,
-            commit_index,
-        };
-        let server = self.server.clone();
-        server.recv_msg(msg);
-        Ok(Response::new(Void {}))
-    }
+    // TODO: REMOVE
+    // async fn vote(&self, request: Request<VoteRequest>) -> Result<Response<Void>, tonic::Status> {
+    //     let msg = request.into_inner();
+    //     let from_id = msg.from_id as usize;
+    //     let term = msg.term as usize;
+    //     let last_log_index = msg.last_log_index as usize;
+    //     let last_log_term = msg.last_log_term as usize;
+    //     let msg = little_raft::message::Message::VoteRequest {
+    //         from_id,
+    //         term,
+    //         last_log_index,
+    //         last_log_term,
+    //     };
+    //     let server = self.server.clone();
+    //     server.recv_msg(msg);
+    //     Ok(Response::new(Void {}))
+    // }
 
-    async fn respond_to_append_entries(
-        &self,
-        request: tonic::Request<AppendEntriesResponse>,
-    ) -> Result<tonic::Response<Void>, tonic::Status> {
-        let msg = request.into_inner();
-        let from_id = msg.from_id as usize;
-        let term = msg.term as usize;
-        let success = msg.success;
-        let last_index = msg.last_index as usize;
-        let mismatch_index = msg.mismatch_index.map(|idx| idx as usize);
-        let msg = little_raft::message::Message::AppendEntryResponse {
-            from_id,
-            term,
-            success,
-            last_index,
-            mismatch_index,
-        };
-        let server = self.server.clone();
-        server.recv_msg(msg);
-        Ok(Response::new(Void {}))
+    // async fn append_entries(
+    //     &self,
+    //     request: Request<AppendEntriesRequest>,
+    // ) -> Result<Response<Void>, tonic::Status> {
+    //     let msg = request.into_inner();
+    //     let from_id = msg.from_id as usize;
+    //     let term = msg.term as usize;
+    //     let prev_log_index = msg.prev_log_index as usize;
+    //     let prev_log_term = msg.prev_log_term as usize;
+    //     let entries: Vec<little_raft::message::LogEntry<StoreCommand>> = msg
+    //         .entries
+    //         .iter()
+    //         .map(|entry| {
+    //             let id = entry.id as usize;
+    //             let sql = entry.sql.to_string();
+    //             let transition = StoreCommand { id, sql };
+    //             let index = entry.index as usize;
+    //             let term = entry.term as usize;
+    //             little_raft::message::LogEntry {
+    //                 transition,
+    //                 index,
+    //                 term,
+    //             }
+    //         })
+    //         .collect();
+    //     let commit_index = msg.commit_index as usize;
+    //     let msg = little_raft::message::Message::AppendEntryRequest {
+    //         from_id,
+    //         term,
+    //         prev_log_index,
+    //         prev_log_term,
+    //         entries,
+    //         commit_index,
+    //     };
+    //     let server = self.server.clone();
+    //     server.recv_msg(msg);
+    //     Ok(Response::new(Void {}))
+    // }
+}
+
+fn ballot_from_proto(b: Ballot) -> omnipaxos_core::ballot_leader_election::Ballot {
+    omnipaxos_core::ballot_leader_election::Ballot {
+        n: b.n,
+        priority: b.priority,
+        pid: b.pid,
+    }
+}
+
+fn store_command_from_proto(sc: proto::StoreCommand) -> StoreCommand {
+    StoreCommand {
+        id: sc.id as usize,
+        sql: sc.sql,
+    }
+}
+
+fn stopsign_from_proto(ss: StopSign) -> omnipaxos_core::storage::StopSign {
+    omnipaxos_core::storage::StopSign {
+        config_id: ss.config_id,
+        nodes: ss.nodes,
+        metadata: ss.metadata as Vec<u8>,
+    }
+}
+
+fn sync_item_from_proto(si: proto::SyncItem) -> SyncItem<StoreCommand,()>{
+    match si {
+        proto::SyncItem::Item::Entries(entries) => {
+            let entries = entries.store_commands.into_iter().map(|sc| store_command_from_proto(sc));
+            return SyncItem::Entries(entries);
+        },
+        proto::SyncItem::Item::Snapshot(_) => return SyncItem::Snapshot(omnipaxos_core::storage::Snapshot<StoreCommand,()>),
+        proto::SyncItem::Item::None(_) => return SyncItem::None,
     }
 }

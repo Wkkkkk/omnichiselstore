@@ -2,18 +2,27 @@ syntax = "proto3";
 
 package proto;
 
-message Void {
+service RPC {
+    rpc Execute(Query) returns (QueryResults);
+    // Omnipaxos
+    rpc Prepare(PrepareReq) returns (Void);
+    rpc Promise(PromiseReq) returns (Void);
+    rpc AcceptSync(AcceptSyncReq) returns (Void);
+    rpc FirstAccept(FirstAcceptReq) returns (Void);
+    rpc AcceptDecide(AcceptDecideReq) returns (Void);
+    rpc Accepted(AcceptedReq) returns (Void);
+    rpc Decide(DecideReq) returns (Void);
+    rpc AcceptStopSign(AcceptStopSignReq) returns (Void);
+    rpc AcceptedStopSign(AcceptedStopSignReq) returns (Void);
+    rpc DecideStopSign(DecideStopSignReq) returns (Void);
 }
 
-// TODO: Remove
-enum Consistency {
-    STRONG = 0;
-    RELAXED_READS = 1;
+
+message Void {
 }
 
 message Query {
     string sql = 1;
-    Consistency consistency = 2;
 }
 
 message QueryResults {
@@ -24,47 +33,122 @@ message QueryRow {
     repeated string values = 1;
 }
 
-message VoteRequest {
-    uint64 from_id = 1;
-    uint64 term = 2;
-    uint64 last_log_index = 3;
-    uint64 last_log_term = 4;
+// Omnipaxos
+
+message Ballot {
+    uint32 n = 1;
+    uint64 priority = 2;
+    uint64 pid = 3;
 }
 
-message VoteResponse {
-    uint64 from_id = 1;
-    uint64 term = 2;
-    bool vote_granted = 3;
-}
-
-message AppendEntriesRequest {
-    uint64 from_id = 1;
-    uint64 term = 2;
-    uint64 prev_log_index = 3;
-    uint64 prev_log_term = 4;
-    repeated LogEntry entries = 5;
-    uint64 commit_index = 6;
-}
-
-message LogEntry {
+message StoreCommand {
     uint64 id = 1;
     string sql = 2;
-    uint64 index = 3;
-    uint64 term = 4;
 }
 
-message AppendEntriesResponse {
-    uint64 from_id = 1;
-    uint64 term = 2;
-    bool success = 3;
-    uint64 last_index = 4;
-    optional uint64 mismatch_index = 5;
+message SyncItem {
+    oneof item {
+        Entries entries = 1;
+        bool snapshot = 2;
+        bool none = 3;
+    }
+
+    message Entries {
+        repeated StoreCommand store_commands = 1;
+    }
 }
 
-service RPC {
-    rpc Execute(Query) returns (QueryResults);
-    rpc Vote(VoteRequest) returns (Void);
-    rpc RespondToVote(VoteResponse) returns (Void);
-    rpc AppendEntries(AppendEntriesRequest) returns (Void);
-    rpc RespondToAppendEntries(AppendEntriesResponse) returns (Void);
+message StopSign {
+    uint32 config_id = 1;
+    repeated uint64 nodes = 2;
+    repeated uint32 metadata = 3;
 }
+
+message PrepareReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    uint64 ld = 4;
+    Ballot n_accepted = 5;
+    uint64 la = 6;
+}
+
+message PromiseReq {
+    uint64 from = 1;
+    uint64 to = 2;
+
+    Ballot n = 3;
+    Ballot n_accepted = 4;
+    optional SyncItem sync_item = 5;
+    uint64 ld = 6;
+    uint64 la = 7;
+    optional StopSign stop_sign = 8;
+}
+
+message AcceptSyncReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    SyncItem sync_item = 4;
+    uint64 sync_idx = 5;
+    optional uint64 decide_idx = 6;
+    optional StopSign stop_sign = 7;
+}
+
+message FirstAcceptReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    repeated StoreCommand entries = 4;
+}
+
+message AcceptDecideReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    uint64 ld = 4;
+    repeated StoreCommand entries = 5;
+}
+
+message AcceptedReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    uint64 la = 4;
+}
+
+message DecideReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    uint64 ld = 4;
+}
+
+message AcceptStopSignReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+    StopSign ss = 4;
+}
+
+message AcceptedStopSignReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+}
+
+message DecideStopSignReq {
+    uint64 from = 1;
+    uint64 to = 2;
+    
+    Ballot n = 3;
+}
+

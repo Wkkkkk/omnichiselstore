@@ -51,12 +51,12 @@ pub struct QueryResultsHolder {
 
 impl QueryResultsHolder {
     pub fn insert_notifier(&mut self, id: u64, notifier: Arc<Notify>) {
-        self.results.insert(id, notifier);
+        self.query_completion_notifiers.insert(id, notifier);
     }
 
     pub fn push_result(&mut self, id: u64, result: Result<QueryResults, StoreError>) {
-        if let Some(completion) = self.query_completion_notifiers.remove(&(q.id as u64)) {
-            self.results.insert(q.id as u64, result);
+        if let Some(completion) = self.query_completion_notifiers.remove(&(id as u64)) {
+            self.results.insert(id as u64, result);
             completion.notify();
         }
     }
@@ -377,7 +377,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
             // wait for append (and decide) to finish in background
             notify.notified().await;  // TODO: replace with channel
-            let results = self.query_results_holder.lock().unwrap().remove_result(&cmd.id).unwrap();
+            let results = self.query_results_holder.lock().unwrap().remove_result(&cmd.id as u64).unwrap();
             results?
         };
         Ok(results)
