@@ -272,10 +272,14 @@ where
     }
 }
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct StoreServer<T: StoreTransport + Send + Sync> {
     this_id: u64,
     next_cmd_id: AtomicU64,
+    #[derivative(Debug = "ignore")]
     sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore<()>>>>,
+    #[derivative(Debug = "ignore")]
     ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
     sp_notifier_rx: Receiver<Message<StoreCommand, ()>>,
     sp_notifier_tx: Sender<Message<StoreCommand, ()>>,

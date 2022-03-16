@@ -162,6 +162,49 @@ fn proto_from_ballot(b: omnipaxos_core::ballot_leader_election::Ballot) -> Ballo
     }
 }
 
+fn proto_from_store_command(sc: StoreCommand) -> proto::StoreCommand {
+    proto::StoreCommand {
+        id: sc.id,
+        sql: sc.sql,
+    }
+}
+
+fn proto_from_sync_item(si: SyncItem<StoreCommand, ()>) -> proto::SyncItem {
+    match si {
+        SyncItem::Entries(entries) => {
+            proto::SyncItem {
+                item: Some(proto::sync_item::Item::Entries(proto::sync_item::Entries {
+                    store_commands: entries.into_iter().map(|e| proto_from_store_command(e)).collect(),
+                }))
+            }
+        },
+        SyncItem::Snapshot(_) => {
+            proto::SyncItem {
+                item: Some(proto::sync_item::Item::Snapshot(true)),
+            }
+        },
+        SyncItem::None => {
+            proto::SyncItem {
+                item: Some(proto::sync_item::Item::None(true)),
+            }
+        },
+    }
+}
+
+fn proto_from_stopsign(ss: omnipaxos_core::storage::StopSign) -> StopSign {
+    let metadata: Vec<u32> = match ss.metadata {
+        Some(md) => {
+            md.into_iter().map(|md| md as u32).collect()
+        },
+        None => [].to_vec(),
+    };
+    StopSign {
+        config_id: ss.config_id,
+        nodes: ss.nodes,
+        metadata,
+    }
+}
+
 #[async_trait]
 impl StoreTransport for RpcTransport {
     fn send_sp(&self, to_id: u64, msg: Message<StoreCommand, ()>) {
@@ -191,12 +234,361 @@ impl StoreTransport for RpcTransport {
                     let req = tonic::Request::new(req.clone());
                     client.conn.prepare(req).await.unwrap();
                 });
-            }
+            },
+            PaxosMsg::Promise(promise) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(promise.n));
+                let n_accepted = Some(proto_from_ballot(promise.n_accepted));
+                let sync_item: Option<proto::SyncItem> = match promise.sync_item {
+                    Some(si) => {
+                        Some(proto_from_sync_item(si))
+                    },
+                    None => None,
+                };
+                let ld = promise.ld;
+                let la = promise.la;
+                let stop_sign: Option<StopSign> = match promise.stopsign {
+                    Some(si) => {
+                        Some(proto_from_stopsign(si))
+                    },
+                    None => None,
+                };
+
+                let req = PromiseReq {
+                    from,
+                    to,
+                    n,
+                    n_accepted,
+                    sync_item,
+                    ld,
+                    la,
+                    stop_sign,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.promise(req).await.unwrap();
+                });
+            },
+            PaxosMsg::AcceptSync(accept_sync) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(accept_sync.n));
+                let sync_item = Some(proto_from_sync_item(accept_sync.sync_item));
+                let sync_idx = accept_sync.sync_idx;
+                let decide_idx = accept_sync.decide_idx;
+                let stop_sign: Option<StopSign> = match accept_sync.stopsign {
+                    Some(si) => {
+                        Some(proto_from_stopsign(si))
+                    },
+                    None => None,
+                };
+
+                let req = AcceptSyncReq {
+                    from,
+                    to,
+                    n,
+                    sync_item,
+                    sync_idx,
+                    decide_idx,
+                    stop_sign,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.accept_sync(req).await.unwrap();
+                });
+            },
+            PaxosMsg::FirstAccept(first_accept) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(first_accept.n));
+                let entries = first_accept.entries.into_iter().map(|e| proto_from_store_command(e)).collect();
+
+                let req = FirstAcceptReq {
+                    from,
+                    to,
+                    n,
+                    entries,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.first_accept(req).await.unwrap();
+                });
+            },
+            PaxosMsg::AcceptDecide(accept_decide) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(accept_decide.n));
+                let ld = accept_decide.ld;
+                let entries = accept_decide.entries.into_iter().map(|e| proto_from_store_command(e)).collect();
+
+                let req = AcceptDecideReq {
+                    from,
+                    to,
+                    n,
+                    ld,
+                    entries,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.accept_decide(req).await.unwrap();
+                });
+            },
+            PaxosMsg::Accepted(accepted) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(accepted.n));
+                let la = accepted.la;
+
+                let req = AcceptedReq {
+                    from,
+                    to,
+                    n,
+                    la,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.accepted(req).await.unwrap();
+                });
+            },
+            PaxosMsg::Decide(decide) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(decide.n));
+                let ld = decide.ld;
+
+                let req = DecideReq {
+                    from,
+                    to,
+                    n,
+                    ld,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.decide(req).await.unwrap();
+                });
+            },
+            PaxosMsg::ProposalForward(entries) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let entries = entries.into_iter().map(|e| proto_from_store_command(e)).collect();
+
+                let req = ProposalForwardReq {
+                    from,
+                    to,
+                    entries,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.proposal_forward(req).await.unwrap();
+                });
+            },
+            PaxosMsg::Compaction(compaction) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let compaction = match compaction {
+                    Compaction::Trim(vec) => {
+                        proto::compaction_req::Compaction::Trim(proto::compaction_req::Trim {
+                            trim: vec,
+                        })
+                    },
+                    Compaction::Snapshot(s) => {
+                        proto::compaction_req::Compaction::Snapshot(s)
+                    },
+                };
+
+                let req = CompactionReq {
+                    from,
+                    to,
+                    compaction: Some(compaction),
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.compaction(req).await.unwrap();
+                });
+            },
+            PaxosMsg::ForwardCompaction(compaction) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let compaction = match compaction {
+                    Compaction::Trim(vec) => {
+                        proto::forward_compaction_req::Compaction::Trim(proto::forward_compaction_req::Trim {
+                            trim: vec,
+                        })
+                    },
+                    Compaction::Snapshot(s) => {
+                        proto::forward_compaction_req::Compaction::Snapshot(s)
+                    },
+                };
+
+                let req = ForwardCompactionReq {
+                    from,
+                    to,
+                    compaction: Some(compaction),
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.forward_compaction(req).await.unwrap();
+                });
+            },
+            PaxosMsg::AcceptStopSign(accept_stop_sign) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(accept_stop_sign.n));
+                let ss = Some(proto_from_stopsign(accept_stop_sign.ss));
+
+                let req = AcceptStopSignReq {
+                    from,
+                    to,
+                    n,
+                    ss,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.accept_stop_sign(req).await.unwrap();
+                });
+            },
+            PaxosMsg::AcceptedStopSign(accepted_stop_sign) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(accepted_stop_sign.n));
+
+                let req = AcceptedStopSignReq {
+                    from,
+                    to,
+                    n,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.accepted_stop_sign(req).await.unwrap();
+                });
+            },
+            PaxosMsg::DecideStopSign(decide_stop_sign) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(decide_stop_sign.n));
+
+                let req = DecideStopSignReq {
+                    from,
+                    to,
+                    n,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.decide_stop_sign(req).await.unwrap();
+                });
+            },
+            _ => panic!("Missing implementation for send message"),
         };
     }
 
     fn send_ble(&self, to_id: u64, msg: BLEMessage) {
+        match msg.msg {
+            HeartbeatMsg::Request(heartbeat_request) => {
+                let from = msg.from;
+                let to = msg.to;
 
+                let round = heartbeat_request.round;
+
+                let req = HeartbeatRequestReq {
+                    from,
+                    to,
+                    round,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.heartbeat_request(req).await.unwrap();
+                });
+            },
+            HeartbeatMsg::Reply(heartbeat_reply) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let round = heartbeat_reply.round;
+                let ballot = Some(proto_from_ballot(heartbeat_reply.ballot));
+                let majority_connected = heartbeat_reply.majority_connected;
+
+                let req = HeartbeatReplyReq {
+                    from,
+                    to,
+                    round,
+                    ballot,
+                    majority_connected,
+                };
+
+                let peer = (self.node_addr)(to_id);
+                let pool = self.connections.clone();
+                tokio::task::spawn(async move {
+                    let mut client = pool.connection(peer).await;
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.heartbeat_reply(req).await.unwrap();
+                });
+            },
+        };
     }
 }
 
