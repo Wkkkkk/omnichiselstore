@@ -287,7 +287,7 @@ pub struct StoreServer<T: StoreTransport + Send + Sync> {
     ble_notifier_tx: Sender<BLEMessage>,
     transport: T,
     query_results_holder: Arc<Mutex<QueryResultsHolder>>,
-    halt: bool,
+    halt: Arc<Mutex<bool>>,
 }
 
 /// Query row.
@@ -351,14 +351,14 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             ble_notifier_tx,
             transport,
             query_results_holder,
-            halt: false,
+            halt: Arc::new(Mutex::new(false)),
         })
     }
 
     /// Run the blocking event loop.
     pub fn run(&self) {
         loop {
-            if self.halt {
+            if *self.halt.lock().unwrap() {
                 break
             }
 
@@ -444,8 +444,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     }
 
     /// Used to shutdown replica
-    pub fn set_halt(&mut self, halt: bool) {
-        self.halt = halt;
+    pub fn set_halt(&self, new_halt: bool) {
+        let mut halt = self.halt.lock().unwrap();
+        *halt = new_halt;
     }
 
     pub fn is_leader(&self) -> bool {

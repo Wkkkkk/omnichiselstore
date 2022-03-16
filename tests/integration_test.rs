@@ -13,18 +13,18 @@ pub mod proto {
   tonic::include_proto!("proto");
 }
 use proto::rpc_client::RpcClient;
-use proto::{Consistency, Query};
+use proto::{Query};
 use tokio::sync::oneshot;
 
 /// Node authority (host and port) in the cluster.
-fn node_authority(id: usize) -> (&'static str, u16) {
+fn node_authority(id: u64) -> (&'static str, u16) {
     let host = "127.0.0.1";
     let port = 50000 + (id as u16);
     (host, port)
 }
 
 /// Node RPC address in cluster.
-fn node_rpc_addr(id: usize) -> String {
+fn node_rpc_addr(id: u64) -> String {
     let (host, port) = node_authority(id);
     format!("http://{}:{}", host, port)
 }
@@ -50,12 +50,12 @@ impl Replica {
         self.store_server.is_leader()
     }
 
-    pub fn get_id(&self) -> usize {
+    pub fn get_id(&self) -> u64 {
         self.store_server.get_id()
     }
 }
 
-async fn start_replica(id: usize, peers: Vec<usize>) -> Replica {
+async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
     let (host, port) = node_authority(id);
     let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
     let transport = RpcTransport::new(Box::new(node_rpc_addr));
@@ -101,11 +101,11 @@ async fn start_replica(id: usize, peers: Vec<usize>) -> Replica {
     }
 }
 
-async fn setup_replicas(num_replicas: usize) -> Vec<Replica> {
+async fn setup_replicas(num_replicas: u64) -> Vec<Replica> {
     let mut replicas: Vec<Replica> = Vec::new();
     for id in 1..(num_replicas+1) {
-        let mut p1: Vec<usize> = (1..id).collect();
-        let mut p2: Vec<usize> = (id..num_replicas+1).collect();
+        let mut p1: Vec<u64> = (1..id).collect();
+        let mut p2: Vec<u64> = (id..num_replicas+1).collect();
         
         p1.append(&mut p2);
         let peers = p1;
@@ -123,7 +123,7 @@ async fn shutdown_replicas(mut replicas: Vec<Replica>) {
 }
 
 use std::error::Error;
-async fn query(replica_id: usize, sql: String) -> Result<String, Box<dyn Error>> {
+async fn query(replica_id: u64, sql: String) -> Result<String, Box<dyn Error>> {
     // create RPC client
     let addr = node_rpc_addr(replica_id);
     let mut client = RpcClient::connect(addr).await.unwrap();
@@ -131,7 +131,6 @@ async fn query(replica_id: usize, sql: String) -> Result<String, Box<dyn Error>>
     // create request
     let query = tonic::Request::new(Query {
         sql: sql,
-        consistency: Consistency::Strong as i32,
     });
 
     // execute request
