@@ -42,11 +42,43 @@ pub struct StoreCommand {
     pub sql: String,
 }
 
+// Used for handling async queries
+#[derive(Clone, Debug)]
+pub struct QueryResultsHolder {
+    query_completion_notifiers: HashMap<u64, Arc<Notify>>,
+    results: HashMap<u64, Result<QueryResults, StoreError>>,
+}
+
+impl QueryResultsHolder {
+    pub fn insert_notifier(&mut self, id: u64, notifier: Arc<Notify>) {
+        self.results.insert(id, notifier);
+    }
+
+    pub fn push_result(&mut self, id: u64, result: Result<QueryResults, StoreError>) {
+        if let Some(completion) = self.query_completion_notifiers.remove(&(q.id as u64)) {
+            self.results.insert(q.id as u64, result);
+            completion.notify();
+        }
+    }
+
+    pub fn remove_result(&mut self, id: u64) -> Option<Result<QueryResults, StoreError>> {
+        self.results.remove(id)
+    }
+    
+    fn default() -> Self {
+        Self {
+            query_completion_notifiers: HashMap::new(),
+            results: HashMap::new(),
+        }
+    }
+}
+
 /// Store configuration.
 #[derive(Debug)]
 struct StoreConfig {
     /// Connection pool size.
     conn_pool_size: usize,
+    query_results_holder: Arc<Mutex<QueryResultsHolder>>,
 }
 
 #[derive(Clone)]
@@ -69,9 +101,7 @@ struct SQLiteStore
     #[derivative(Debug = "ignore")]
     conn_pool: Vec<Arc<Mutex<Connection>>>,
     conn_idx: usize,
-
-    command_completions: HashMap<u64, Arc<Notify>>,
-    results: HashMap<u64, Result<QueryResults, StoreError>>,
+    query_results_holder: Arc<Mutex<QueryResultsHolder>>,
 }
 
 impl SQLiteStore
@@ -102,8 +132,7 @@ impl SQLiteStore
             conn_pool,
             conn_idx,
 
-            command_completions: HashMap::new(),
-            results: HashMap::new(),
+            query_results_holder: config.query_results_holder,
         }
     }
 
@@ -159,12 +188,9 @@ where
         for q in queries_to_run.iter() {
             let conn = self.get_connection();
             let results = query(conn, q.sql);
-            
-            self.results.insert(q.id as u64, results);
 
-            if let Some(completion) = self.command_completions.remove(&(q.id as u64)) {
-                completion.notify();
-            }
+            let query_results_holder = self.query_results_holder.lock().unwrap();
+            query_results_holder.push_result(q.id as u64, results);
         }
 
         self.ld = ld;
@@ -214,6 +240,7 @@ pub struct StoreServer<T: StoreTransport + Send + Sync> {
     ble_notifier_rx: Receiver<BLEMessage>,
     ble_notifier_tx: Sender<BLEMessage>,
     transport: T,
+    query_results_holder: Arc<Mutex<QueryResultsHolder>>,
     halt: bool,
 }
 
@@ -249,7 +276,8 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         sp_config.set_pid(this_id);
         sp_config.set_peers(peers);
 
-        let store_config = StoreConfig { conn_pool_size: 20 };
+        let query_results_holder = Arc::new(Mutex::new(QueryResultsHolder::default()));
+        let store_config = StoreConfig { conn_pool_size: 20, query_results_holder: query_results_holder.clone() };
         let sqlite_store = SQLiteStore::new(this_id, store_config);
         
         let sp = Arc::new(Mutex::new(SequencePaxos::with(sp_config, sqlite_store)));
@@ -276,6 +304,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             ble_notifier_rx,
             ble_notifier_tx,
             transport,
+            query_results_holder,
             halt: false,
         })
     }
@@ -337,8 +366,8 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 
                 let notify = Arc::new(Notify::new());
 
-                let sqlite_store = self.sqlite_store.lock().unwrap();
-                sqlite_store.command_completions.insert(id, notify.clone()); // TODO: replace with channel
+                let query_results_holder = self.query_results_holder.lock().unwrap();
+                query_results_holder.insert_notifier(id, notify.clone());
                 
                 (notify, cmd)
             };
@@ -348,7 +377,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
             // wait for append (and decide) to finish in background
             notify.notified().await;  // TODO: replace with channel
-            let results = self.sqlite_store.lock().unwrap().results.remove(&cmd.id).unwrap();
+            let results = self.query_results_holder.lock().unwrap().remove_result(&cmd.id).unwrap();
             results?
         };
         Ok(results)
