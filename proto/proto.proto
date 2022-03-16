@@ -5,6 +5,8 @@ package proto;
 service RPC {
     rpc Execute(Query) returns (QueryResults);
     // Omnipaxos
+
+    // sequence paxos
     rpc Prepare(PrepareReq) returns (Void);
     rpc Promise(PromiseReq) returns (Void);
     rpc AcceptSync(AcceptSyncReq) returns (Void);
@@ -15,6 +17,10 @@ service RPC {
     rpc AcceptStopSign(AcceptStopSignReq) returns (Void);
     rpc AcceptedStopSign(AcceptedStopSignReq) returns (Void);
     rpc DecideStopSign(DecideStopSignReq) returns (Void);
+
+    // ballot leader election
+    rpc HeartbeatRequest(HeartbeatRequestReq) returns (Void);
+    rpc HeartbeatReply(HeartbeatReplyReq) returns (Void);
 }
 
 
@@ -152,3 +158,18 @@ message DecideStopSignReq {
     Ballot n = 3;
 }
 
+message HeartbeatRequestReq {
+    uint64 from = 1;
+    uint64 to = 2;
+
+    uint32 round = 3;
+}
+
+message HeartbeatReplyReq {
+    uint64 from = 1;
+    uint64 to = 2;
+
+    uint32 round = 3;
+    Ballot ballot = 4;
+    bool majority_connected = 5;
+}

@@ -27,8 +27,8 @@ use omnipaxos_core::{
 #[async_trait]
 pub trait StoreTransport {
     /// Send a store command message `msg` to `to_id` node.
-    fn send_sp(&self, to_id: usize, msg: Message<StoreCommand, ()>);
-    fn send_ble(&self, to_id: usize, msg: BLEMessage);
+    fn send_sp(&self, to_id: u64, msg: Message<StoreCommand, ()>);
+    fn send_ble(&self, to_id: u64, msg: BLEMessage);
 }
 
 /// Store command.
@@ -37,7 +37,7 @@ pub trait StoreTransport {
 #[derive(Clone, Debug)]
 pub struct StoreCommand {
     /// Unique ID of this command.
-    pub id: usize,
+    pub id: u64,
     /// The SQL statement of this command.
     pub sql: String,
 }
@@ -61,7 +61,7 @@ impl QueryResultsHolder {
         }
     }
 
-    pub fn remove_result(&mut self, id: u64) -> Option<Result<QueryResults, StoreError>> {
+    pub fn remove_result(&mut self, id: &u64) -> Option<Result<QueryResults, StoreError>> {
         self.results.remove(id)
     }
     
@@ -97,7 +97,7 @@ struct SQLiteStore
     // TODO: Snapshots
 
     /// SQLite
-    this_id: usize,
+    this_id: u64,
     #[derivative(Debug = "ignore")]
     conn_pool: Vec<Arc<Mutex<Connection>>>,
     conn_idx: usize,
@@ -106,7 +106,7 @@ struct SQLiteStore
 
 impl SQLiteStore
 {
-    pub fn new(this_id: usize, config: StoreConfig) -> Self {
+    pub fn new(this_id: u64, config: StoreConfig) -> Self {
         let mut conn_pool = vec![];
         let conn_pool_size = config.conn_pool_size;
         for _ in 0..conn_pool_size {
@@ -190,7 +190,7 @@ where
             let results = query(conn, q.sql);
 
             let query_results_holder = self.query_results_holder.lock().unwrap();
-            query_results_holder.push_result(q.id as u64, results);
+            query_results_holder.push_result(q.id, results);
         }
 
         self.ld = ld;
@@ -231,7 +231,7 @@ where
 }
 
 pub struct StoreServer<T: StoreTransport + Send + Sync> {
-    this_id: usize,
+    this_id: u64,
     next_cmd_id: AtomicU64,
     sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore>>>,
     ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
@@ -267,7 +267,7 @@ pub struct QueryResults {
 const HEARTBEAT_TIMEOUT: u64 = 20; // ticks until timeout
 impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Start a new server as part of a ChiselStore cluster.
-    pub fn start(this_id: usize, peers: Vec<usize>, transport: T) -> Result<Self, StoreError> {
+    pub fn start(this_id: u64, peers: Vec<u64>, transport: T) -> Result<Self, StoreError> {
         // sequence paxos
         let configuration_id = 1;
 
@@ -284,8 +284,8 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
         // ballot leader election
         let mut ble_config = BLEConfig::default();
-        ble_config.set_pid(this_id as u64);
-        ble_config.set_peers(peers as Vec<u64>);
+        ble_config.set_pid(this_id);
+        ble_config.set_peers(peers);
         ble_config.set_hb_delay(HEARTBEAT_TIMEOUT);
 
         let ble = Arc::new(Mutex::new(BallotLeaderElection::with(ble_conf)));
@@ -317,8 +317,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             }
 
             let sequence_paxos = self.sequence_paxos.lock().unwrap();
+            let ballot_leader_election = self.ballot_leader_election.lock().unwrap();
 
-            if let Some(leader) = self.ballot_leader_election.tick() {
+            if let Some(leader) = ballot_leader_election.tick() {
                 // a new leader is elected, pass it to SequencePaxos.
                 sequence_paxos.handle_leader(leader);
             }
@@ -327,24 +328,25 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
             match self.sp_notifier_rx.try_recv() {
                 Ok(msg) => {
-                    self.sequence_paxos.handle(msg);
+                    sequence_paxos.handle(msg);
                 }
             }
 
+
             match self.ble_notifier_rx.try_recv() {
                 Ok(msg) => {
-                    self.ballot_leader_election.handle(msg);
+                    ballot_leader_election.handle(msg);
                 }
             }
 
             // send outgoing messages
 
-            for out_msg in self.sequence_paxos.get_outgoings_msgs() {
+            for out_msg in sequence_paxos.get_outgoing_msgs() {
                 let receiver = out_msg.to;
                 self.transport.send_sp(receiver, out_msg);
             }
 
-            for out_msg in self.ballot_leader_election.get_outgoings_msgs() {
+            for out_msg in ballot_leader_election.get_outgoing_msgs() {
                 let receiver = out_msg.to;
                 self.transport.send_ble(receiver, out_msg);
             }
@@ -360,7 +362,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             let (notify, cmd) = {
                 let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
                 let cmd = StoreCommand {
-                    id: id as usize,
+                    id: id,
                     sql: stmt.as_ref().to_string(),
                 };
                 
@@ -377,7 +379,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
             // wait for append (and decide) to finish in background
             notify.notified().await;  // TODO: replace with channel
-            let results = self.query_results_holder.lock().unwrap().remove_result(&cmd.id as u64).unwrap();
+            let results = self.query_results_holder.lock().unwrap().remove_result(&cmd.id).unwrap();
             results?
         };
         Ok(results)

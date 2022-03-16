@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use omnipaxos_core::{
+    ballot_leader_election::messages::{BLEMessage, HeartbeatMsg, HeartbeatRequest, HeartbeatReply},
     messages::{
         Message, PaxosMsg, Prepare, Promise, AcceptSync, 
         FirstAccept, AcceptDecide, Accepted, Decide, 
@@ -30,6 +31,7 @@ use proto::{
     Ballot, StopSign, PrepareReq, PromiseReq, 
     AcceptSyncReq, FirstAcceptReq, AcceptDecideReq, AcceptedReq, 
     DecideReq, AcceptStopSignReq, AcceptedStopSignReq, DecideStopSignReq,
+    HeartbeatRequestReq, HeartbeatReplyReq,
 };
 
 type NodeAddrFn = dyn Fn(usize) -> String + Send + Sync;
@@ -347,65 +349,266 @@ impl Rpc for RpcService {
         
         Ok(Response::new(Void {}))
     }
-
     
+    async fn accept_sync(&self, request: Request<AcceptSyncReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
 
-    // TODO: REMOVE
-    // async fn vote(&self, request: Request<VoteRequest>) -> Result<Response<Void>, tonic::Status> {
-    //     let msg = request.into_inner();
-    //     let from_id = msg.from_id as usize;
-    //     let term = msg.term as usize;
-    //     let last_log_index = msg.last_log_index as usize;
-    //     let last_log_term = msg.last_log_term as usize;
-    //     let msg = little_raft::message::Message::VoteRequest {
-    //         from_id,
-    //         term,
-    //         last_log_index,
-    //         last_log_term,
-    //     };
-    //     let server = self.server.clone();
-    //     server.recv_msg(msg);
-    //     Ok(Response::new(Void {}))
-    // }
+        let n = ballot_from_proto(msg.n.unwrap());
+        
+        let sync_item = sync_item_from_proto(message.sync_item.unwrap());
+        let sync_idx = msg.sync_idx;
 
-    // async fn append_entries(
-    //     &self,
-    //     request: Request<AppendEntriesRequest>,
-    // ) -> Result<Response<Void>, tonic::Status> {
-    //     let msg = request.into_inner();
-    //     let from_id = msg.from_id as usize;
-    //     let term = msg.term as usize;
-    //     let prev_log_index = msg.prev_log_index as usize;
-    //     let prev_log_term = msg.prev_log_term as usize;
-    //     let entries: Vec<little_raft::message::LogEntry<StoreCommand>> = msg
-    //         .entries
-    //         .iter()
-    //         .map(|entry| {
-    //             let id = entry.id as usize;
-    //             let sql = entry.sql.to_string();
-    //             let transition = StoreCommand { id, sql };
-    //             let index = entry.index as usize;
-    //             let term = entry.term as usize;
-    //             little_raft::message::LogEntry {
-    //                 transition,
-    //                 index,
-    //                 term,
-    //             }
-    //         })
-    //         .collect();
-    //     let commit_index = msg.commit_index as usize;
-    //     let msg = little_raft::message::Message::AppendEntryRequest {
-    //         from_id,
-    //         term,
-    //         prev_log_index,
-    //         prev_log_term,
-    //         entries,
-    //         commit_index,
-    //     };
-    //     let server = self.server.clone();
-    //     server.recv_msg(msg);
-    //     Ok(Response::new(Void {}))
-    // }
+        let decide_idx = msg.decide_idx;
+        
+        let mut stopsign: Option<omnipaxos_core::storage::StopSign> = match msg.stop_sign {
+            Some(ss) => Some(stopsign_from_proto(ss)),
+            _ => None,
+        };
+
+        let msg = AcceptSync {
+            n,
+            sync_item,
+            sync_idx,
+            decide_idx,
+            stopsign,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::AcceptSync(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn first_accept(&self, request: Request<FirstAcceptReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+
+        let msg = FirstAccept {
+            n,
+            entries,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::FirstAccept(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn accept_decide(&self, request: Request<AcceptDecideReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let ld = msg.ld;
+        let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+
+        let msg = AcceptDecide {
+            n,
+            ld,
+            entries,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::AcceptDecide(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn accepted(&self, request: Request<AcceptedReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let la = msg.la;
+
+        let msg = Accepted {
+            n,
+            la,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::Accepted(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn decide(&self, request: Request<DecideReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let ld = msg.ld;
+
+        let msg = Decide {
+            n,
+            ld,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::Decide(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn accept_stop_sign(&self, request: Request<AcceptStopSignReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+        let ss = stopsign_from_proto(msg.ss.unwrap());
+
+        let msg = AcceptStopSign {
+            n,
+            ss,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::AcceptStopSign(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn accepted_stop_sign(&self, request: Request<AcceptedStopSignReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+
+        let msg = AcceptedStopSign {
+            n,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::AcceptedStopSign(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn decide_stop_sign(&self, request: Request<DecideStopSignReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let n = ballot_from_proto(msg.n.unwrap());
+
+        let msg = DecideStopSign {
+            n,
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::DecideStopSign(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+
+    async fn heartbeat_request(&self, request: Request<HeartbeatRequestReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let round = msg.round;
+
+        let msg = HeartbeatRequest {
+            round,
+        };
+
+        let msg = BLEMessage {
+            from,
+            to,
+            msg: HeartbeatMsg::Request(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_ble_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+
+    async fn heartbeat_reply(&self, request: Request<HeartbeatReplyReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let round = msg.round;
+        let ballot = ballot_from_proto(msg.ballot.unwrap());
+        let majority_connected = msg.majority_connected;
+
+        let msg = HeartbeatReply {
+            round,
+            ballot,
+            majority_connected,
+        };
+
+        let msg = BLEMessage {
+            from,
+            to,
+            msg: HeartbeatMsg::Reply(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_ble_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
 }
 
 fn ballot_from_proto(b: Ballot) -> omnipaxos_core::ballot_leader_election::Ballot {
@@ -418,23 +621,27 @@ fn ballot_from_proto(b: Ballot) -> omnipaxos_core::ballot_leader_election::Ballo
 
 fn store_command_from_proto(sc: proto::StoreCommand) -> StoreCommand {
     StoreCommand {
-        id: sc.id as usize,
+        id: sc.id,
         sql: sc.sql,
     }
 }
 
 fn stopsign_from_proto(ss: StopSign) -> omnipaxos_core::storage::StopSign {
+    let config_id = ss.config_id;
+    let nodes = ss.nodes;
+    let metadata = Some(ss.metadata.map(|md| => md as u8).collect());
+    
     omnipaxos_core::storage::StopSign {
-        config_id: ss.config_id,
-        nodes: ss.nodes,
-        metadata: ss.metadata as Vec<u8>,
+        config_id,
+        nodes,
+        metadata,
     }
 }
 
 fn sync_item_from_proto(si: proto::SyncItem) -> SyncItem<StoreCommand,()>{
     match si {
         proto::SyncItem::Item::Entries(entries) => {
-            let entries = entries.store_commands.into_iter().map(|sc| store_command_from_proto(sc));
+            let entries = entries.store_commands.into_iter().map(|sc| store_command_from_proto(sc)).collect();
             return SyncItem::Entries(entries);
         },
         proto::SyncItem::Item::Snapshot(_) => return SyncItem::Snapshot(omnipaxos_core::storage::Snapshot<StoreCommand,()>),
