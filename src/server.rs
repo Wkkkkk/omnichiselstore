@@ -3,6 +3,8 @@
 use crate::errors::StoreError;
 use async_notify::Notify;
 use async_trait::async_trait;
+use std::thread::sleep;
+use std::time::Duration;
 use crossbeam_channel as channel;
 use crossbeam_channel::{Receiver, Sender};
 use derivative::Derivative;
@@ -398,6 +400,8 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 let receiver = out_msg.to;
                 self.transport.send_ble(receiver, out_msg);
             }
+
+            sleep(Duration::from_millis(10));
         }
     }
 
