@@ -1,7 +1,7 @@
 //! ChiselStore RPC module.
 
 use crate::rpc::proto::rpc_server::Rpc;
-use crate::{Consistency, StoreCommand, StoreServer, StoreTransport};
+use crate::{StoreCommand, StoreServer, StoreTransport};
 use async_mutex::Mutex;
 use async_trait::async_trait;
 use crossbeam::queue::ArrayQueue;
@@ -14,8 +14,7 @@ use omnipaxos_core::{
     messages::{
         Message, PaxosMsg, Prepare, Promise, AcceptSync, 
         FirstAccept, AcceptDecide, Accepted, Decide, 
-        ProposalForward, Compaction, ForwardCompaction, 
-        AcceptStopSign, AcceptedStopSign, DecideStopSign,
+        Compaction, AcceptStopSign, AcceptedStopSign, DecideStopSign,
     },
     util::{SyncItem}
 };
@@ -30,11 +29,12 @@ use proto::{
     Query, QueryResults, QueryRow, Void,
     Ballot, StopSign, PrepareReq, PromiseReq, 
     AcceptSyncReq, FirstAcceptReq, AcceptDecideReq, AcceptedReq, 
-    DecideReq, AcceptStopSignReq, AcceptedStopSignReq, DecideStopSignReq,
+    DecideReq, ProposalForwardReq, CompactionReq, ForwardCompactionReq,
+    AcceptStopSignReq, AcceptedStopSignReq, DecideStopSignReq,
     HeartbeatRequestReq, HeartbeatReplyReq,
 };
 
-type NodeAddrFn = dyn Fn(usize) -> String + Send + Sync;
+type NodeAddrFn = dyn Fn(u64) -> String + Send + Sync;
 
 #[derive(Debug)]
 struct ConnectionPool {
@@ -93,7 +93,6 @@ impl Connections {
     }
 }
 
-/// RPC transport.
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct RpcTransport {
@@ -113,140 +112,100 @@ impl RpcTransport {
     }
 }
 
+fn ballot_from_proto(b: Ballot) -> omnipaxos_core::ballot_leader_election::Ballot {
+    omnipaxos_core::ballot_leader_election::Ballot {
+        n: b.n,
+        priority: b.priority,
+        pid: b.pid,
+    }
+}
+
+fn store_command_from_proto(sc: proto::StoreCommand) -> StoreCommand {
+    StoreCommand {
+        id: sc.id,
+        sql: sc.sql,
+    }
+}
+
+fn stopsign_from_proto(ss: StopSign) -> omnipaxos_core::storage::StopSign {
+    let config_id = ss.config_id;
+    let nodes = ss.nodes;
+    let metadata = Some(ss.metadata.into_iter().map(|md| md as u8).collect());
+    
+    omnipaxos_core::storage::StopSign {
+        config_id,
+        nodes,
+        metadata,
+    }
+}
+
+fn sync_item_from_proto(si: proto::SyncItem) -> SyncItem<StoreCommand,()> {
+    match si.item.unwrap() {
+        proto::sync_item::Item::Entries(entries) => {
+            let entries = entries.store_commands.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+            return SyncItem::Entries(entries);
+        },
+        proto::sync_item::Item::Snapshot(_) => {
+            return SyncItem::Snapshot(omnipaxos_core::storage::SnapshotType::Delta(())) // TODO: Support SnapshotType::Complete
+        },
+        proto::sync_item::Item::None(_) => {
+            return SyncItem::None
+        },
+    }
+}
+
+fn proto_from_ballot(b: omnipaxos_core::ballot_leader_election::Ballot) -> Ballot {
+    Ballot {
+        n: b.n,
+        priority: b.priority,
+        pid: b.pid,
+    }
+}
+
 #[async_trait]
 impl StoreTransport for RpcTransport {
-    fn send_sp(&self, to_id: usize, msg: Message<StoreCommand, ()>) {
-        match msg {
-            Message::AppendEntryRequest {
-                from_id,
-                term,
-                prev_log_index,
-                prev_log_term,
-                entries,
-                commit_index,
-            } => {
-                let from_id = from_id as u64;
-                let term = term as u64;
-                let prev_log_index = prev_log_index as u64;
-                let prev_log_term = prev_log_term as u64;
-                let entries = entries
-                    .iter()
-                    .map(|entry| {
-                        let id = entry.transition.id as u64;
-                        let index = entry.index as u64;
-                        let sql = entry.transition.sql.clone();
-                        let term = entry.term as u64;
-                        LogEntry {
-                            id,
-                            sql,
-                            index,
-                            term,
-                        }
-                    })
-                    .collect();
-                let commit_index = commit_index as u64;
-                let request = AppendEntriesRequest {
-                    from_id,
-                    term,
-                    prev_log_index,
-                    prev_log_term,
-                    entries,
-                    commit_index,
+    fn send_sp(&self, to_id: u64, msg: Message<StoreCommand, ()>) {
+        match msg.msg {
+            PaxosMsg::Prepare(prepare) => {
+                let from = msg.from;
+                let to = msg.to;
+
+                let n = Some(proto_from_ballot(prepare.n));
+                let ld = prepare.ld;
+                let n_accepted = Some(proto_from_ballot(prepare.n_accepted));
+                let la = prepare.la;
+
+                let req = PrepareReq {
+                    from,
+                    to,
+                    n,
+                    ld,
+                    n_accepted,
+                    la,
                 };
+
                 let peer = (self.node_addr)(to_id);
                 let pool = self.connections.clone();
                 tokio::task::spawn(async move {
                     let mut client = pool.connection(peer).await;
-                    let request = tonic::Request::new(request.clone());
-                    client.conn.append_entries(request).await.unwrap();
+                    let req = tonic::Request::new(req.clone());
+                    client.conn.prepare(req).await.unwrap();
                 });
             }
-            Message::AppendEntryResponse {
-                from_id,
-                term,
-                success,
-                last_index,
-                mismatch_index,
-            } => {
-                let from_id = from_id as u64;
-                let term = term as u64;
-                let last_index = last_index as u64;
-                let mismatch_index = mismatch_index.map(|idx| idx as u64);
-                let request = AppendEntriesResponse {
-                    from_id,
-                    term,
-                    success,
-                    last_index,
-                    mismatch_index,
-                };
-                let peer = (self.node_addr)(to_id);
-                let pool = self.connections.clone();
-                tokio::task::spawn(async move {
-                    let mut client = pool.connection(peer).await;
-                    let request = tonic::Request::new(request.clone());
-                    client
-                        .conn
-                        .respond_to_append_entries(request)
-                        .await
-                        .unwrap();
-                });
-            }
-            Message::VoteRequest {
-                from_id,
-                term,
-                last_log_index,
-                last_log_term,
-            } => {
-                let from_id = from_id as u64;
-                let term = term as u64;
-                let last_log_index = last_log_index as u64;
-                let last_log_term = last_log_term as u64;
-                let request = VoteRequest {
-                    from_id,
-                    term,
-                    last_log_index,
-                    last_log_term,
-                };
-                let peer = (self.node_addr)(to_id);
-                let pool = self.connections.clone();
-                tokio::task::spawn(async move {
-                    let mut client = pool.connection(peer).await;
-                    let vote = tonic::Request::new(request.clone());
-                    client.conn.vote(vote).await.unwrap();
-                });
-            }
-            Message::VoteResponse {
-                from_id,
-                term,
-                vote_granted,
-            } => {
-                let peer = (self.node_addr)(to_id);
-                tokio::task::spawn(async move {
-                    let from_id = from_id as u64;
-                    let term = term as u64;
-                    let response = VoteResponse {
-                        from_id,
-                        term,
-                        vote_granted,
-                    };
-                    if let Ok(mut client) = RpcClient::connect(peer.to_string()).await {
-                        let response = tonic::Request::new(response.clone());
-                        client.respond_to_vote(response).await.unwrap();
-                    }
-                });
-            }
-        }
+        };
     }
 
-    fn send_ble(&self, to_id: usize, msg: BLEMessage) {
+    fn send_ble(&self, to_id: u64, msg: BLEMessage) {
 
     }
 }
 
 /// RPC service.
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct RpcService {
     /// The ChiselStore server access via this RPC service.
+    #[derivative(Debug = "ignore")]
     pub server: Arc<StoreServer<RpcTransport>>,
 }
 
@@ -316,7 +275,7 @@ impl Rpc for RpcService {
         let n = ballot_from_proto(msg.n.unwrap());
         let n_accepted = ballot_from_proto(msg.n_accepted.unwrap());
         
-        let mut sync_item: Option<SyncItem<StoreCommand,()>> = match msg.sync_item {
+        let sync_item: Option<SyncItem<StoreCommand,()>> = match msg.sync_item {
             Some(si) => Some(sync_item_from_proto(si)),
             _ => None,
         };
@@ -324,7 +283,7 @@ impl Rpc for RpcService {
         let ld = msg.ld;
         let la = msg.la;
 
-        let mut stopsign: Option<omnipaxos_core::storage::StopSign> = match msg.stop_sign {
+        let stopsign: Option<omnipaxos_core::storage::StopSign> = match msg.stop_sign {
             Some(ss) => Some(stopsign_from_proto(ss)),
             _ => None,
         };
@@ -357,12 +316,12 @@ impl Rpc for RpcService {
 
         let n = ballot_from_proto(msg.n.unwrap());
         
-        let sync_item = sync_item_from_proto(message.sync_item.unwrap());
+        let sync_item = sync_item_from_proto(msg.sync_item.unwrap());
         let sync_idx = msg.sync_idx;
 
         let decide_idx = msg.decide_idx;
         
-        let mut stopsign: Option<omnipaxos_core::storage::StopSign> = match msg.stop_sign {
+        let stopsign: Option<omnipaxos_core::storage::StopSign> = match msg.stop_sign {
             Some(ss) => Some(stopsign_from_proto(ss)),
             _ => None,
         };
@@ -481,6 +440,77 @@ impl Rpc for RpcService {
             from,
             to,
             msg: PaxosMsg::Decide(msg),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn proposal_forward(&self, request: Request<ProposalForwardReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::ProposalForward(entries),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn compaction(&self, request: Request<CompactionReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let compaction = match msg.compaction.unwrap() {
+            proto::compaction_req::Compaction::Trim(trim) => {
+                Compaction::Trim(trim.trim)
+            },
+            proto::compaction_req::Compaction::Snapshot(ss) => {
+                Compaction::Snapshot(ss)
+            },
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::Compaction(compaction),
+        };
+
+        let server = self.server.clone();
+        server.recv_sp_msg(msg);
+        
+        Ok(Response::new(Void {}))
+    }
+    
+    async fn forward_compaction(&self, request: Request<ForwardCompactionReq>) -> Result<Response<Void>, tonic::Status> {
+        let msg = request.into_inner();
+        let from = msg.from;
+        let to = msg.to;
+
+        let compaction = match msg.compaction.unwrap() {
+            proto::forward_compaction_req::Compaction::Trim(trim) => {
+                Compaction::Trim(trim.trim)
+            },
+            proto::forward_compaction_req::Compaction::Snapshot(ss) => {
+                Compaction::Snapshot(ss)
+            },
+        };
+
+        let msg = Message {
+            from,
+            to,
+            msg: PaxosMsg::ForwardCompaction(compaction),
         };
 
         let server = self.server.clone();
@@ -608,43 +638,5 @@ impl Rpc for RpcService {
         server.recv_ble_msg(msg);
         
         Ok(Response::new(Void {}))
-    }
-}
-
-fn ballot_from_proto(b: Ballot) -> omnipaxos_core::ballot_leader_election::Ballot {
-    omnipaxos_core::ballot_leader_election::Ballot {
-        n: b.n,
-        priority: b.priority,
-        pid: b.pid,
-    }
-}
-
-fn store_command_from_proto(sc: proto::StoreCommand) -> StoreCommand {
-    StoreCommand {
-        id: sc.id,
-        sql: sc.sql,
-    }
-}
-
-fn stopsign_from_proto(ss: StopSign) -> omnipaxos_core::storage::StopSign {
-    let config_id = ss.config_id;
-    let nodes = ss.nodes;
-    let metadata = Some(ss.metadata.map(|md| => md as u8).collect());
-    
-    omnipaxos_core::storage::StopSign {
-        config_id,
-        nodes,
-        metadata,
-    }
-}
-
-fn sync_item_from_proto(si: proto::SyncItem) -> SyncItem<StoreCommand,()>{
-    match si {
-        proto::SyncItem::Item::Entries(entries) => {
-            let entries = entries.store_commands.into_iter().map(|sc| store_command_from_proto(sc)).collect();
-            return SyncItem::Entries(entries);
-        },
-        proto::SyncItem::Item::Snapshot(_) => return SyncItem::Snapshot(omnipaxos_core::storage::Snapshot<StoreCommand,()>),
-        proto::SyncItem::Item::None(_) => return SyncItem::None,
     }
 }
