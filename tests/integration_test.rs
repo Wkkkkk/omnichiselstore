@@ -294,7 +294,7 @@ async fn leader_dies() {
     
     // write to table
     tokio::task::spawn(async move {
-        query(living_replica_id, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+        query(living_replica_id, String::from("INSERT INTO test_leader_drop VALUES(1)")).await.unwrap();
     }).await.unwrap();
 
     // END: Test
@@ -311,7 +311,7 @@ async fn leader_dies() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn follower_dies() {
-    // Write to cluster, kill leader, read written value from another node
+    // Write to cluster, kill follower, read written value from another node
     /// Note: LittleRaft does not support changes to the cluster and will get stuck
     
     let mut replicas = setup_replicas(3).await;
@@ -323,7 +323,7 @@ async fn follower_dies() {
         query(1, String::from("CREATE TABLE IF NOT EXISTS test_follower_drop (id integer PRIMARY KEY)")).await.unwrap();
     }).await.unwrap();
     
-    // kill leader
+    // kill a follower
     let mut follower_idx = 0;
     for (i, r) in replicas.iter().enumerate() {
         if !r.is_leader() {
@@ -339,7 +339,7 @@ async fn follower_dies() {
     
     // write to table
     tokio::task::spawn(async move {
-        query(living_replica_id, String::from("CREATE TABLE IF NOT EXISTS test_follower_drop (id integer PRIMARY KEY)")).await.unwrap();
+        query(living_replica_id, String::from("INSERT INTO test_follower_drop VALUES(1)")).await.unwrap();
     }).await.unwrap();
 
     // END: Test
