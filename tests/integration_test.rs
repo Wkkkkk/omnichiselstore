@@ -16,6 +16,19 @@ use proto::rpc_client::RpcClient;
 use proto::{Query};
 use tokio::sync::oneshot;
 
+use slog::info;
+use sloggers::Build;
+use sloggers::terminal::{TerminalLoggerBuilder, Destination};
+use sloggers::types::Severity;
+fn log(s: String) {
+    let mut builder = TerminalLoggerBuilder::new();
+    builder.level(Severity::Debug);
+    builder.destination(Destination::Stderr);
+
+    let logger = builder.build().unwrap();
+    info!(logger, "{}", s);
+}
+
 /// Node authority (host and port) in the cluster.
 fn node_authority(id: u64) -> (&'static str, u16) {
     let host = "127.0.0.1";
@@ -31,7 +44,8 @@ fn node_rpc_addr(id: u64) -> String {
 
 struct Replica {
     store_server: std::sync::Arc<StoreServer<RpcTransport>>,
-    store_handle: tokio::task::JoinHandle<()>,
+    store_message_handle: tokio::task::JoinHandle<()>,
+    store_ble_handle: tokio::task::JoinHandle<()>,
     rpc_handle: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
     halt_sender: tokio::sync::oneshot::Sender<()>,
     shutdown_sender: tokio::sync::oneshot::Sender<()>,
@@ -43,7 +57,8 @@ impl Replica {
         self.rpc_handle.await.unwrap();
 
         self.halt_sender.send(());
-        self.store_handle.await.unwrap();
+        self.store_message_handle.await.unwrap();
+        self.store_ble_handle.await.unwrap();
     }
 
     pub fn is_leader(&self) -> bool {
@@ -62,20 +77,27 @@ async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
     let server = StoreServer::start(id, peers, transport).unwrap();
     let server = Arc::new(server);
     let (halt_sender, halt_receiver) = oneshot::channel::<()>();
-    let store_handle = {
-        let server = server.clone();
-        let s = server.clone();
+    let store_handles = {
+        let server_receiver = server.clone();
+        let server_message_loop = server.clone();
+        let server_ble_loop = server.clone();
         tokio::task::spawn(async move {
             match halt_receiver.await {
-                Ok(_) => s.set_halt(true),
+                Ok(_) => server_receiver.set_halt(true),
                 Err(_) => println!("Received error in halt_receiver"),
             };
         });
-        tokio::task::spawn(async move {
+        let ble_loop = tokio::task::spawn(async move {
             println!("ChiselStore node starting..");
-            server.run();
+            server_ble_loop.run_ble_loop();
             println!("ChiselStore node shutting down..");
-        })
+        });
+        let message_loop = tokio::task::spawn(async move {
+            println!("ChiselStore node starting..");
+            server_message_loop.run_message_loop();
+            println!("ChiselStore node shutting down..");
+        });
+        (message_loop, ble_loop)
     };
     let (shutdown_sender, shutdown_receiver) = oneshot::channel::<()>();
     let rpc_handle = {
@@ -94,7 +116,8 @@ async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
 
     return Replica {
         store_server: server.clone(),
-        store_handle,
+        store_message_handle: store_handles.0,
+        store_ble_handle: store_handles.1,
         rpc_handle,
         halt_sender,
         shutdown_sender,
@@ -104,11 +127,10 @@ async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
 async fn setup_replicas(num_replicas: u64) -> Vec<Replica> {
     let mut replicas: Vec<Replica> = Vec::new();
     for id in 1..(num_replicas+1) {
-        let mut p1: Vec<u64> = (1..id).collect();
-        let mut p2: Vec<u64> = (id..num_replicas+1).collect();
-        
-        p1.append(&mut p2);
-        let peers = p1;
+        let mut peers: Vec<u64> = (1..num_replicas+1).collect();
+        peers.remove((id - 1) as usize);
+
+        log(format!("setup pid: {} peers: {:?}", id, peers).to_string());
 
         replicas.push(start_replica(id, peers).await);
     }
@@ -169,16 +191,19 @@ async fn write_read() {
         // create table
         query(1, String::from("CREATE TABLE IF NOT EXISTS test (id integer PRIMARY KEY)")).await.unwrap();
 
+        
         // create new entry
         query(1, String::from("INSERT INTO test VALUES(1)")).await.unwrap();
-
+        
         // read new entry from replica 1
         let res = query(1, String::from("SELECT id FROM test WHERE id = 1")).await.unwrap();
         assert!(res == "1");
+        log(format!("query res: {}", res).to_string());
         
         // read new entry from replica 2
         let res = query(2, String::from("SELECT id FROM test WHERE id = 1")).await.unwrap();
         assert!(res == "1");
+        log(format!("query res: {}", res).to_string());
 
         // drop table
         query(1, String::from("DROP TABLE test")).await.unwrap();

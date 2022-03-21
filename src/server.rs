@@ -5,8 +5,6 @@ use async_notify::Notify;
 use async_trait::async_trait;
 use std::thread::sleep;
 use std::time::Duration;
-use crossbeam_channel as channel;
-use crossbeam_channel::{Receiver, Sender};
 use derivative::Derivative;
 use sqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
@@ -283,10 +281,6 @@ pub struct StoreServer<T: StoreTransport + Send + Sync> {
     sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore<()>>>>,
     #[derivative(Debug = "ignore")]
     ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
-    sp_notifier_rx: Receiver<Message<StoreCommand, ()>>,
-    sp_notifier_tx: Sender<Message<StoreCommand, ()>>,
-    ble_notifier_rx: Receiver<BLEMessage>,
-    ble_notifier_tx: Sender<BLEMessage>,
     transport: T,
     query_results_holder: Arc<Mutex<QueryResultsHolder>>,
     halt: Arc<Mutex<bool>>,
@@ -312,7 +306,7 @@ pub struct QueryResults {
     pub rows: Vec<QueryRow>,
 }
 
-const HEARTBEAT_TIMEOUT: u64 = 20; // ticks until timeout
+const HEARTBEAT_TIMEOUT: u64 = 100; // ticks until timeout
 impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Start a new server as part of a ChiselStore cluster.
     pub fn start(this_id: u64, peers: Vec<u64>, transport: T) -> Result<Self, StoreError> {
@@ -337,20 +331,12 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         ble_config.set_hb_delay(HEARTBEAT_TIMEOUT);
 
         let ble = Arc::new(Mutex::new(BallotLeaderElection::with(ble_config)));
-
-        // transport channels
-        let (sp_notifier_tx, sp_notifier_rx) = channel::unbounded();
-        let (ble_notifier_tx, ble_notifier_rx) = channel::unbounded();
         
         Ok(StoreServer {
             this_id,
             next_cmd_id: AtomicU64::new(0),
             sequence_paxos: sp,
             ballot_leader_election: ble,
-            sp_notifier_rx,
-            sp_notifier_tx,
-            ble_notifier_rx,
-            ble_notifier_tx,
             transport,
             query_results_holder,
             halt: Arc::new(Mutex::new(false)),
@@ -358,36 +344,16 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     }
 
     /// Run the blocking event loop.
-    pub fn run(&self) {
+    pub fn run_message_loop(&self) {
         loop {
+            sleep(Duration::from_millis(1));
+
             if *self.halt.lock().unwrap() {
                 break
             }
 
             let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
             let mut ballot_leader_election = self.ballot_leader_election.lock().unwrap();
-
-            if let Some(leader) = ballot_leader_election.tick() {
-                // a new leader is elected, pass it to SequencePaxos.
-                sequence_paxos.handle_leader(leader);
-            }
-
-            // check incoming messages
-
-            match self.sp_notifier_rx.try_recv() {
-                Ok(msg) => {
-                    sequence_paxos.handle(msg);
-                },
-                _ => {},
-            };
-
-
-            match self.ble_notifier_rx.try_recv() {
-                Ok(msg) => {
-                    ballot_leader_election.handle(msg);
-                },
-                _ => {},
-            };
 
             // send outgoing messages
 
@@ -400,8 +366,25 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 let receiver = out_msg.to;
                 self.transport.send_ble(receiver, out_msg);
             }
+        }
+    }
+    
+    /// Run the blocking event loop.
+    pub fn run_ble_loop(&self) {
+        loop {
+            sleep(Duration::from_millis(1));
 
-            sleep(Duration::from_millis(10));
+            if *self.halt.lock().unwrap() {
+                break
+            }
+
+            let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
+            let mut ballot_leader_election = self.ballot_leader_election.lock().unwrap();
+
+            if let Some(leader) = ballot_leader_election.tick() {
+                // a new leader is elected, pass it to SequencePaxos.
+                sequence_paxos.handle_leader(leader);
+            }
         }
     }
 
@@ -439,12 +422,14 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
     /// Receive a sequence paxos message from the ChiselStore cluster.
     pub fn recv_sp_msg(&self, msg: Message<StoreCommand, ()>) {
-        self.sp_notifier_tx.send(msg).unwrap();
+        let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
+        sequence_paxos.handle(msg);
     }
     
     /// Receive a ballot leader election message from the ChiselStore cluster.
     pub fn recv_ble_msg(&self, msg: BLEMessage) {
-        self.ble_notifier_tx.send(msg).unwrap();
+        let mut ballot_leader_election = self.ballot_leader_election.lock().unwrap();
+        ballot_leader_election.handle(msg);
     }
 
     /// Used to shutdown replica

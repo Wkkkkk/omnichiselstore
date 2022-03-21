@@ -20,6 +20,8 @@ tonic = "0.5.2"
 tokio-test = "0.4.2"
 futures = "*"
 omnipaxos_core = { git = "https://github.com/haraldng/omnipaxos" }
+slog = "*"
+sloggers = "*"
 
 [build-dependencies]
 tonic-build = "0.5.2"
