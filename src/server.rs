@@ -3,8 +3,7 @@
 use crate::errors::StoreError;
 use async_notify::Notify;
 use async_trait::async_trait;
-use std::thread::sleep;
-use std::time::Duration;
+use tokio::time::{sleep, Duration};
 use derivative::Derivative;
 use sqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
@@ -306,7 +305,9 @@ pub struct QueryResults {
     pub rows: Vec<QueryRow>,
 }
 
-const HEARTBEAT_TIMEOUT: u64 = 100; // ticks until timeout
+const HEARTBEAT_TIMEOUT: u64 = 10; // ticks until timeout
+const MESSAGE_LOOP_TIMEOUT_MS: u64 = 1; // How often to check for new outgoing messages
+const BLE_LOOP_TIMEOUT_MS: u64 = 100; // How often to check to do a BLE tick
 impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Start a new server as part of a ChiselStore cluster.
     pub fn start(this_id: u64, peers: Vec<u64>, transport: T) -> Result<Self, StoreError> {
@@ -344,9 +345,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     }
 
     /// Run the blocking event loop.
-    pub fn run_message_loop(&self) {
+    pub async fn run_message_loop(&self) {
         loop {
-            sleep(Duration::from_millis(1));
+            sleep(Duration::from_millis(MESSAGE_LOOP_TIMEOUT_MS)).await;
 
             if *self.halt.lock().unwrap() {
                 break
@@ -370,9 +371,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     }
     
     /// Run the blocking event loop.
-    pub fn run_ble_loop(&self) {
+    pub async fn run_ble_loop(&self) {
         loop {
-            sleep(Duration::from_millis(1));
+            sleep(Duration::from_millis(BLE_LOOP_TIMEOUT_MS)).await;
 
             if *self.halt.lock().unwrap() {
                 break
