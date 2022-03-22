@@ -88,14 +88,14 @@ async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
             };
         });
         let ble_loop = tokio::task::spawn(async move {
-            println!("ChiselStore node starting..");
-            server_ble_loop.run_ble_loop();
-            println!("ChiselStore node shutting down..");
+            log(format!("BLE loop starting for pid: {}", id).to_string());
+            server_ble_loop.run_ble_loop().await;
+            log("BLE loop shutting down".to_string());
         });
         let message_loop = tokio::task::spawn(async move {
-            println!("ChiselStore node starting..");
-            server_message_loop.run_message_loop();
-            println!("ChiselStore node shutting down..");
+            log(format!("Message loop starting for pid: {}", id).to_string());
+            server_message_loop.run_message_loop().await;
+            log("Message loop shutting down".to_string());
         });
         (message_loop, ble_loop)
     };
@@ -104,12 +104,12 @@ async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
         let server = server.clone();
         let rpc = RpcService::new(server);
         tokio::task::spawn(async move {
-            println!("RPC listening to {} ...", rpc_listen_addr);
+            log(format!("RPC listening to {} ...", rpc_listen_addr).to_string());
             let ret = Server::builder()
                 .add_service(RpcServer::new(rpc))
                 .serve_with_shutdown(rpc_listen_addr, shutdown_receiver.map(drop))
                 .await;
-            println!("RPC Server shutting down...");
+            log("RPC Server shutting down...".to_string());
             ret
         })
     };
