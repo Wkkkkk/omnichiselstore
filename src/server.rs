@@ -197,8 +197,21 @@ where
     }
 
     fn set_decided_idx(&mut self, ld: u64) {
-        // run queries
-        let queries_to_run = self.log[(self.ld as usize)..(ld as usize)].to_vec();
+        
+        let old_ld = self.ld;
+        let new_ld = ld;
+
+        self.ld = ld;
+
+        
+        let ss = self.get_stopsign();
+        if self.log.len() < (new_ld as usize) && !ss.is_none() { // stop sign decided, do nothing
+            return;
+        }
+
+        // commit decided transactions to DB
+        let queries_to_run = self.log[(old_ld as usize)..(new_ld as usize)].to_vec();
+        
         for q in queries_to_run.iter() {
             let conn = self.get_connection();
             let results = query(conn, q.sql.clone());
@@ -206,8 +219,6 @@ where
             let mut query_results_holder = self.query_results_holder.lock().unwrap();
             query_results_holder.push_result(q.id, results);
         }
-
-        self.ld = ld;
     }
 
     fn get_decided_idx(&self) -> u64 {
@@ -241,15 +252,15 @@ where
         self.n_prom
     }
 
-    // TEMP Snapshots impl
     fn set_stopsign(&mut self, s: StopSignEntry) {
         self.stopsign = Some(s);
     }
-
+    
     fn get_stopsign(&self) -> Option<StopSignEntry> {
         self.stopsign.clone()
     }
-
+    
+    // TEMP: Snapshot impl
     fn trim(&mut self, trimmed_idx: u64) {
         self.log.drain(0..trimmed_idx as usize);
     }
@@ -320,10 +331,8 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         sp_config.set_peers(peers.to_vec());
 
         let query_results_holder = Arc::new(Mutex::new(QueryResultsHolder::default()));
-        let store_config = StoreConfig { conn_pool_size: 20, query_results_holder: query_results_holder.clone() };
-        let sqlite_store = SQLiteStore::new(this_id, store_config);
-        
-        let sp = Arc::new(Mutex::new(SequencePaxos::with(sp_config, sqlite_store)));
+
+        let sequence_paxos = Arc::new(Mutex::new(new_sequence_paxos(configuration_id, this_id, peers.clone(), query_results_holder.clone(), None)));
 
         // ballot leader election
         let mut ble_config = BLEConfig::default();
@@ -331,13 +340,13 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         ble_config.set_peers(peers);
         ble_config.set_hb_delay(HEARTBEAT_TIMEOUT);
 
-        let ble = Arc::new(Mutex::new(BallotLeaderElection::with(ble_config)));
+        let ballot_leader_election = Arc::new(Mutex::new(BallotLeaderElection::with(ble_config)));
         
         Ok(StoreServer {
             this_id,
             next_cmd_id: AtomicU64::new(0),
-            sequence_paxos: sp,
-            ballot_leader_election: ble,
+            sequence_paxos,
+            ballot_leader_election,
             transport,
             query_results_holder,
             halt: Arc::new(Mutex::new(false)),
@@ -367,6 +376,35 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 let receiver = out_msg.to;
                 self.transport.send_ble(receiver, out_msg);
             }
+
+            // check if node has stopped
+            if sequence_paxos.stopped() {
+                let final_entry = sequence_paxos.read(sequence_paxos.get_decided_idx());
+                
+                if final_entry.is_some() {
+                    let final_entry = final_entry.unwrap();
+                    match final_entry {
+                        omnipaxos_core::util::LogEntry::StopSign(ss) => {
+                            if !ss.nodes.contains(&self.this_id) { // node not part of new configuration
+                                return;
+                            }
+                            
+                            let configuration_id = ss.config_id;
+                            
+                            let mut nodes = ss.nodes;
+                            let this_idx = nodes.iter().position(|&n| n == self.this_id).unwrap();
+                            nodes.remove(this_idx);
+                            
+                            let peers = nodes;
+
+                            let query_results_holder = self.query_results_holder.clone();
+                            
+                            *sequence_paxos = new_sequence_paxos(configuration_id, self.this_id, peers, query_results_holder, ballot_leader_election.get_leader());
+                        },
+                        _ => panic!("Unexpected log entry"),
+                    };
+                }
+            };
         }
     }
     
@@ -409,7 +447,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 
                 let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
                 sequence_paxos.append(cmd).expect("Failed to append");
-
+                
                 (notify, id)
             };
 
@@ -439,12 +477,35 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         *halt = new_halt;
     }
 
-    pub fn is_leader(&self) -> bool {
+    pub fn get_current_leader(&self) -> u64 {
         let sequence_paxos = self.sequence_paxos.lock().unwrap();
-        sequence_paxos.get_current_leader() == (self.this_id as u64)
+        sequence_paxos.get_current_leader()
     }
 
     pub fn get_id(&self) -> u64 {
         self.this_id
     }
+
+    /// Reconfigure Omnipaxos cluster. Should be called from leader
+    pub fn reconfigure(&self, new_cluster: Vec<u64>) -> Result<(), omnipaxos_core::sequence_paxos::ProposeErr<StoreCommand>> {
+        let rc = omnipaxos_core::sequence_paxos::ReconfigurationRequest::with(new_cluster, None);
+        
+        let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
+        sequence_paxos.reconfigure(rc)
+    }
+}
+
+fn new_sequence_paxos(configuration_id: u32, pid: u64, peers: Vec<u64>, query_results_holder: Arc<Mutex<QueryResultsHolder>>, skip_prepare_use_leader: Option<Ballot>) -> SequencePaxos<StoreCommand, (), SQLiteStore<()>> {
+    let mut sp_config = SequencePaxosConfig::default();
+    sp_config.set_configuration_id(configuration_id);
+    sp_config.set_pid(pid);
+    sp_config.set_peers(peers.to_vec());
+    if let Some(b) = skip_prepare_use_leader {
+        sp_config.set_skip_prepare_use_leader(b);
+    }
+
+    let store_config = StoreConfig { conn_pool_size: 20, query_results_holder };
+    let sqlite_store = SQLiteStore::new(pid, store_config);
+    
+    SequencePaxos::with(sp_config, sqlite_store)
 }

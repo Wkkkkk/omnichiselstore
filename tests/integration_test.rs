@@ -62,11 +62,19 @@ impl Replica {
     }
 
     pub fn is_leader(&self) -> bool {
-        self.store_server.is_leader()
+        self.store_server.get_current_leader() == self.store_server.get_id()
     }
 
     pub fn get_id(&self) -> u64 {
         self.store_server.get_id()
+    }
+
+    pub fn get_current_leader(&self) -> u64 {
+        self.store_server.get_current_leader()
+    }
+
+    pub fn reconfigure(&self, new_cluster: Vec<u64>) {
+        self.store_server.reconfigure(new_cluster);
     }
 }
 
@@ -277,6 +285,7 @@ async fn leader_dies() {
     tokio::task::spawn(async {
         query(1, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
     }).await.unwrap();
+
     
     // kill leader
     let mut leader_idx = 0;
@@ -286,22 +295,42 @@ async fn leader_dies() {
             break
         }
     }
-
+    
     let leader = replicas.remove(leader_idx);
     leader.shutdown().await;
 
-    let living_replica_id = replicas[0].get_id();
+    log(format!("Leader with idx {} dead", leader_idx).to_string());
+    
+    // reconfigure
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    
+    let mut new_leader_idx = 0;
+    let mut new_cluster: Vec<u64> = Vec::new();
+    for (i, r) in replicas.iter().enumerate() {
+        if r.is_leader() {
+            new_leader_idx = i;
+        }
+        new_cluster.push(r.get_id());
+    }
+
+    replicas[new_leader_idx].reconfigure(new_cluster);
+
+    log(format!("Leader with idx {} reconfigure", new_leader_idx).to_string());
+    
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    
+    // continue querying
+    let living_replica_id = replicas[new_leader_idx].get_id();
     
     // write to table
     tokio::task::spawn(async move {
         query(living_replica_id, String::from("INSERT INTO test_leader_drop VALUES(1)")).await.unwrap();
     }).await.unwrap();
-
+    
     // END: Test
-
+    
     // drop table
-    let living_replica_id = replicas[0].get_id();
-
+    let living_replica_id = replicas[new_leader_idx].get_id();
     tokio::task::spawn(async move {
         query(living_replica_id, String::from("DROP TABLE test_leader_drop")).await.unwrap();
     }).await.unwrap();
@@ -345,8 +374,6 @@ async fn follower_dies() {
     // END: Test
 
     // drop table
-    let living_replica_id = replicas[0].get_id();
-
     tokio::task::spawn(async move {
         query(living_replica_id, String::from("DROP TABLE test_follower_drop")).await.unwrap();
     }).await.unwrap();
