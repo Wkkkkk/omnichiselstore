@@ -273,7 +273,7 @@ async fn synchronous_writes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn leader_dies() {
+async fn leader_crashes() {
     /// Note: LittleRaft does not support changes to the cluster and will get stuck
     // Write to cluster, kill leader, read written value from another node
     
@@ -339,7 +339,7 @@ async fn leader_dies() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn follower_dies() {
+async fn follower_crashes() {
     // Write to cluster, kill follower, read written value from another node
     /// Note: LittleRaft does not support changes to the cluster and will get stuck
     
