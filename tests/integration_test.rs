@@ -221,8 +221,8 @@ async fn write_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sequential_writes() {
-    // ChiselStore uses SQLite which only allows for sequential writes
+async fn synchronous_writes() {
+    // ChiselStore uses SQLite which only allows for synchronous writes
     // 1. write (1,1) -> replica A
     // 2. (over-)write (1,2) -> replica B
     // 3. read x from replica A
@@ -236,38 +236,38 @@ async fn sequential_writes() {
 
     // create table
     tokio::task::spawn(async {
-        query(1, String::from("CREATE TABLE IF NOT EXISTS test_sequential (id integer PRIMARY KEY, value integer NOT NULL)")).await.unwrap();
+        query(1, String::from("CREATE TABLE IF NOT EXISTS test_synchronous (id integer PRIMARY KEY, value integer NOT NULL)")).await.unwrap();
     }).await.unwrap();
     
     // write replica A
     let write_a = tokio::task::spawn(async {
         // create new entry
         println!("write_a");
-        query(1, String::from("INSERT OR REPLACE INTO test_sequential VALUES(1,1)")).await.unwrap();
+        query(1, String::from("INSERT OR REPLACE INTO test_synchronous VALUES(1,1)")).await.unwrap();
     });
     
     // write replica B
     let write_b = tokio::task::spawn(async {
         // create new entry
         println!("write_b");
-        query(2, String::from("INSERT OR REPLACE INTO test_sequential VALUES(1,2)")).await.unwrap();
+        query(2, String::from("INSERT OR REPLACE INTO test_synchronous VALUES(1,2)")).await.unwrap();
     });
     
     write_a.await.unwrap();
     write_b.await.unwrap();
 
     // read new entry from replica 1
-    let x = query(1, String::from("SELECT value FROM test_sequential WHERE id = 1")).await.unwrap();
+    let x = query(1, String::from("SELECT value FROM test_synchronous WHERE id = 1")).await.unwrap();
     
     // read new entry from replica 2
-    let y = query(2, String::from("SELECT value FROM test_sequential WHERE id = 1")).await.unwrap();
+    let y = query(2, String::from("SELECT value FROM test_synchronous WHERE id = 1")).await.unwrap();
     
     assert!(x == y);
 
     // END: TEST
     
     // drop table
-    query(1, String::from("DROP TABLE test_sequential")).await.unwrap();
+    query(1, String::from("DROP TABLE test_synchronous")).await.unwrap();
 
     shutdown_replicas(replicas).await;
 }
