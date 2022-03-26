@@ -302,7 +302,7 @@ async fn leader_crashes() {
     log(format!("Leader with idx {} dead", leader_idx).to_string());
     
     // reconfigure
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // wait for leader election
     
     let mut new_leader_idx = 0;
     let mut new_cluster: Vec<u64> = Vec::new();
@@ -317,7 +317,7 @@ async fn leader_crashes() {
 
     log(format!("Leader with idx {} reconfigure", new_leader_idx).to_string());
     
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await; // wait for reconfiguration
     
     // continue querying
     let living_replica_id = replicas[new_leader_idx].get_id();
