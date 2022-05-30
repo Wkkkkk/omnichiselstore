@@ -172,6 +172,11 @@ fn query(conn: Arc<Mutex<Connection>>, sql: String) -> Result<QueryResults, Stor
     Ok(QueryResults { rows })
 }
 
+fn skip_query(conn: Arc<Mutex<Connection>>, sql: String) -> Result<QueryResults, StoreError> {
+    let mut rows = vec![];
+    Ok(QueryResults { rows })
+}
+
 impl<S> Storage<StoreCommand, S> for SQLiteStore<S>
 where
     S: Snapshot<StoreCommand>,
@@ -214,7 +219,7 @@ where
         
         for q in queries_to_run.iter() {
             let conn = self.get_connection();
-            let results = query(conn, q.sql.clone());
+            let results = skip_query(conn, q.sql.clone());
 
             let mut query_results_holder = self.query_results_holder.lock().unwrap();
             query_results_holder.push_result(q.id, results);

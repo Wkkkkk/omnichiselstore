@@ -159,6 +159,7 @@ pub async fn query(replica_id: u64, sql: String) -> Result<String, Box<dyn Error
     let mut client = RpcClient::connect(addr).await.unwrap();
     
     // create request
+    // log(format!("execute query: {}", sql));
     let query = tonic::Request::new(Query {
         sql: sql,
     });
