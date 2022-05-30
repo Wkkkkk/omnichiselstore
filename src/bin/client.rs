@@ -1,7 +1,10 @@
 use omnichiselstore::boost::*;
-use omnichiselstore::util::dataloader::Loader;
 
-use std::env;
+use std::{
+    env,
+    fs::File,
+    io::{prelude::*, BufReader},
+};
 
 use tokio::main;
 use tokio::signal;
@@ -12,15 +15,13 @@ async fn main() {
     if args.len() < 2 {
         panic!("not enough arguments.");
     }
-
-    let loader = Loader::new(&args[1]);
-    let total_size = loader.size();
-    println!("loader: {}", total_size);
-    loader.print_head();
+    
+    let file = File::open(&args[1]).expect("no such file");
+    let mut reader = BufReader::new(file);
 
     tokio::task::spawn(async {
-        for sql in loader.queries {
-            let _res = query(1, sql).await.unwrap();
+        for line in reader.lines() {
+            let _res = query(1, line.unwrap()).await.unwrap();
         }
     }).await.unwrap();
 
