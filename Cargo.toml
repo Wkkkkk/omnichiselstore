@@ -23,6 +23,8 @@ futures = "*"
 omnipaxos_core = { path = "../omnipaxos/omnipaxos_core" }
 slog = "*"
 sloggers = "*"
+regex = { version = "1.5", features = ["pattern"] }
+lazy_static = "1.4.0"
 
 [build-dependencies]
 tonic-build = "0.5.2"

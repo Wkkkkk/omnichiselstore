@@ -97,6 +97,7 @@ pub mod errors;
 pub mod rpc;
 pub mod server;
 pub mod boost;
+pub mod preprocessing;
 pub mod util;
 
 pub use errors::StoreError;

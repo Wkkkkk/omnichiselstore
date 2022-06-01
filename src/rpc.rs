@@ -8,6 +8,7 @@ use crossbeam::queue::ArrayQueue;
 use derivative::Derivative;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread;
 use tonic::{Request, Response, Status};
 use omnipaxos_core::{
     ballot_leader_election::messages::{BLEMessage, HeartbeatMsg, HeartbeatRequest, HeartbeatReply},
@@ -18,6 +19,7 @@ use omnipaxos_core::{
     },
     util::{SyncItem}
 };
+use crate::boost::log;
 
 #[allow(missing_docs)]
 pub mod proto {
@@ -599,6 +601,8 @@ pub struct RpcService {
     /// The ChiselStore server access via this RPC service.
     #[derivative(Debug = "ignore")]
     pub server: Arc<StoreServer<RpcTransport>>,
+    // cache
+    
 }
 
 impl RpcService {
@@ -615,6 +619,8 @@ impl Rpc for RpcService {
         request: Request<Query>,
     ) -> Result<Response<QueryResults>, tonic::Status> {
         let query = request.into_inner();
+        //TODO: encode the command here
+        log(format!("Rpc execute: {:?}", query).to_string());
         
         let server = self.server.clone();
         let results = match server.query(query.sql).await {
@@ -767,6 +773,9 @@ impl Rpc for RpcService {
         let msg = request.into_inner();
         let from = msg.from;
         let to = msg.to;
+
+        //TODO: decode entries here
+        log(format!("{:?} is decoding entries: {:?}", thread::current().id(), msg.entries).to_string());
 
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;
