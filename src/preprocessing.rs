@@ -10,7 +10,7 @@ pub fn split_query(query: &str) -> (String, String) {
             r#"('\d+\\.*?')"#,                // hash values
             r#"'((')|(.*?([^\\])'))"#,        // string
             r#""((")|(.*?([^\\])"))"#,        // double-quoted string
-            r#"([^a-zA-Z '(])\d+(\.\d+)?"#,   // integers(prevent us from capturing table name like "a1")
+            r#"([^a-zA-Z'(,\*])\d+(\.\d+)?"#,   // integers(prevent us from capturing table name like "a1")
         ];
         static ref regex_sets: Vec<Regex> = rules.iter()
                     .map(|s| Regex::new(s).unwrap())
@@ -53,6 +53,8 @@ pub fn split_query(query: &str) -> (String, String) {
 // Merge template string with parameters
 // There should be the exact number of parameters to fill in
 pub fn merge_query(template: String, parameters: String) -> String {
+    if parameters.is_empty() { return template; }
+
     let parameter_list = parameters
         .split(",")
         .collect::<Vec<_>>();
@@ -88,6 +90,23 @@ mod tests {
             AND st.stop_id = @ AND e.stop_time_id = st.id AND e.estimate_source =  @ \
             AND st.agency_id = @ AND e.agency_id = st.agency_id;");
         assert_eq!(parameters, "21,13,'49','33\\de1c23ef00193a150490901e26c91ea4','802017','8\\32e67cabf78d1bd875e0878d67001805',80");
+
+        let restored_query = merge_query(template, parameters);
+        assert_eq!(restored_query, query);
+    }
+
+    #[test]
+    fn this_works() {
+        let query = "INSERT INTO m.avl  (agency_id, trip_id, route_id, avl_lat, avl_lon, vehicle_id, destination_id, avl_time_hour, \
+            avl_time_minute, avl_date, route_short_name, block_ref) VALUES (80, '33\\3aaecf2b3ea22a0169d3f9ca8e57150f', \
+            '3\\5af586f8860571f3b29eb439e2985fb0',40.649485,-73.916274,6623,307182,21,13,'2016-11-29', \
+            '3\\5af586f8860571f3b29eb439e2985fb0', '46\\875cccffb1923728f3269e9eb5400ed7')";
+
+        let (template, parameters) = split_query(query);
+        assert_eq!(template, "INSERT INTO m.avl  (agency_id, trip_id, route_id, avl_lat, avl_lon, vehicle_id, destination_id, avl_time_hour, \
+            avl_time_minute, avl_date, route_short_name, block_ref) VALUES (@, @, @,@,@,@,@,@,@,@, @, @)");
+        assert_eq!(parameters, "80,'33\\3aaecf2b3ea22a0169d3f9ca8e57150f','3\\5af586f8860571f3b29eb439e2985fb0',40.649485,\
+            -73.916274,6623,307182,21,13,'2016-11-29','3\\5af586f8860571f3b29eb439e2985fb0','46\\875cccffb1923728f3269e9eb5400ed7'");
 
         let restored_query = merge_query(template, parameters);
         assert_eq!(restored_query, query);
