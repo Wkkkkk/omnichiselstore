@@ -16,6 +16,7 @@ use omnipaxos_core::{
     storage::{Storage, Snapshot, StopSignEntry},
     messages::Message,
 };
+use std::thread;
 
 /// ChiselStore transport layer.
 ///
@@ -215,6 +216,7 @@ where
         }
 
         // commit decided transactions to DB
+        println!("{:?} decides: {}, {}, {}", thread::current().id(), old_ld, new_ld, self.log.len());
         let queries_to_run = self.log[(old_ld as usize)..(new_ld as usize)].to_vec();
         
         for q in queries_to_run.iter() {
@@ -466,6 +468,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
 
     /// Receive a sequence paxos message from the ChiselStore cluster.
     pub fn recv_sp_msg(&self, msg: Message<StoreCommand, ()>) {
+        // TODO: dead lock
         let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
         sequence_paxos.handle(msg);
     }
