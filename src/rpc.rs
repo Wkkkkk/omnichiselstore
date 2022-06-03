@@ -22,6 +22,7 @@ use omnipaxos_core::{
 use crate::boost::log;
 use crate::preprocessing::*;
 use lecar::controller::Controller;
+use std::time::Instant;
 
 #[allow(missing_docs)]
 pub mod proto {
@@ -625,10 +626,14 @@ impl Rpc for RpcService {
     ) -> Result<Response<QueryResults>, tonic::Status> {
         let mut query = request.into_inner();
         //TODO: encode the command here
+        let now = Instant::now();
         log(format!("Rpc execute: {:?}", query).to_string());
+
         // split query
         let (template, parameters) = split_query(&query.sql);
         let mut cache = self.cache.lock().await;
+        cache.counter.num_queries += 1;
+        cache.counter.raw_messsages_size += query.sql.len() as u64;
 
         if let Some(index) = cache.get_index_of(&template) {
             // exists in cache
@@ -636,13 +641,19 @@ impl Rpc for RpcService {
             let compressed = format!("1*|*{}*|*{}", index.to_string(), parameters);
 
             query.sql = compressed;
+            cache.counter.hits += 1;
         } else {
             // send template and parameters
             let uncompressed = format!("0*|*{}*|*{}", template, parameters);
 
             query.sql = uncompressed;
+            cache.counter.misses += 1;
         }
-        
+        let elapsed = now.elapsed();
+        cache.counter.compressed_size += query.sql.len() as u64;
+        cache.counter.compression_time += elapsed.as_millis() as u64;
+        cache.counter.try_write_to_file();
+
         let server = self.server.clone();
         let results = match server.query(query.sql).await {
             Ok(results) => results,
@@ -800,6 +811,7 @@ impl Rpc for RpcService {
 
         //TODO: decode entries here
         log(format!("{:?} is decoding entries: {:?}", thread::current().id(), msg.entries).to_string());
+        let now = Instant::now();
 
         let mut cache = self.cache.lock().await;
         let n = ballot_from_proto(msg.n.unwrap());
@@ -834,9 +846,10 @@ impl Rpc for RpcService {
             })
             // .map(|sc| store_command_from_proto(sc))
             .collect();
+        let elapsed = now.elapsed();
+        cache.counter.decompression_time += elapsed.as_millis() as u64;
         // unlock
         drop(cache);
-
 
         let msg = AcceptDecide {
             n,
