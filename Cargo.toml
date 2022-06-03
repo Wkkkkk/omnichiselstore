@@ -21,6 +21,7 @@ tokio-test = "0.4.2"
 futures = "*"
 # omnipaxos_core = { git = "https://github.com/baawa/omnipaxos" }
 omnipaxos_core = { path = "../omnipaxos/omnipaxos_core" }
+lecar = { path = "../lecar" }
 slog = "*"
 sloggers = "*"
 regex = { version = "1.5", features = ["pattern"] }

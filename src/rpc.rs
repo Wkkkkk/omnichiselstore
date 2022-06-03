@@ -20,6 +20,8 @@ use omnipaxos_core::{
     util::{SyncItem}
 };
 use crate::boost::log;
+use crate::preprocessing::*;
+use lecar::controller::Controller;
 
 #[allow(missing_docs)]
 pub mod proto {
@@ -353,6 +355,7 @@ impl StoreTransport for RpcTransport {
                 tokio::task::spawn(async move {
                     let mut client = pool.connection(peer).await;
                     let req = tonic::Request::new(req.clone());
+                    // TODO: dead lock
                     client.conn.accept_decide(req).await.unwrap();
                 });
             },
@@ -397,6 +400,7 @@ impl StoreTransport for RpcTransport {
                 tokio::task::spawn(async move {
                     let mut client = pool.connection(peer).await;
                     let req = tonic::Request::new(req.clone());
+                    // TODO: dead lock
                     client.conn.decide(req).await.unwrap();
                 });
             },
@@ -602,13 +606,14 @@ pub struct RpcService {
     #[derivative(Debug = "ignore")]
     pub server: Arc<StoreServer<RpcTransport>>,
     // cache
-    
+    cache: Arc<Mutex<Controller>>
 }
 
 impl RpcService {
     /// Creates a new RPC service.
     pub fn new(server: Arc<StoreServer<RpcTransport>>) -> Self {
-        Self { server }
+        Self { server,
+               cache: Arc::new(Mutex::new(Controller::new(200, 20, 20))) }
     }
 }
 
@@ -618,15 +623,34 @@ impl Rpc for RpcService {
         &self,
         request: Request<Query>,
     ) -> Result<Response<QueryResults>, tonic::Status> {
-        let query = request.into_inner();
+        let mut query = request.into_inner();
         //TODO: encode the command here
         log(format!("Rpc execute: {:?}", query).to_string());
+        // split query
+        let (template, parameters) = split_query(&query.sql);
+        let mut cache = self.cache.lock().await;
+
+        if let Some(index) = cache.get_index_of(&template) {
+            // exists in cache
+            // send index and parameters
+            let compressed = format!("1*|*{}*|*{}", index.to_string(), parameters);
+
+            query.sql = compressed;
+        } else {
+            // send template and parameters
+            let uncompressed = format!("0*|*{}*|*{}", template, parameters);
+
+            query.sql = uncompressed;
+        }
         
         let server = self.server.clone();
         let results = match server.query(query.sql).await {
             Ok(results) => results,
             Err(e) => return Err(Status::internal(format!("{}", e))),
         };
+
+        // update cache for leader
+        cache.insert(&template, template.clone());
 
         let mut rows = vec![];
         for row in results.rows {
@@ -777,9 +801,42 @@ impl Rpc for RpcService {
         //TODO: decode entries here
         log(format!("{:?} is decoding entries: {:?}", thread::current().id(), msg.entries).to_string());
 
+        let mut cache = self.cache.lock().await;
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;
-        let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+        let entries = msg.entries
+            .into_iter()
+            .filter_map(|sc| {
+                let parts: Vec<&str> = sc.sql.split("*|*").collect();
+                if parts.len() != 3 { 
+                    log(format!("Unexpected query: {:?}", sc.sql).to_string());
+                    return None 
+                }
+
+                let (compressed, index_or_template, parameters) = (parts[0], parts[1].to_string(), parts[2].to_string());
+                let mut template = index_or_template.clone();
+
+                if compressed == "1" {
+                    // compressed messsage
+                    let index = index_or_template.parse::<usize>().unwrap();
+                    if let Some(cacheitem) = cache.get_index(index) {
+                        template = cacheitem.value().to_string();
+                    } else { 
+                        panic!("Out of index: {}", index);
+                    }
+                }
+                
+                // update cache for followers
+                cache.insert(&template, template.clone());
+                
+                let sql = merge_query(template, parameters);
+                Some(StoreCommand {id: sc.id, sql})
+            })
+            // .map(|sc| store_command_from_proto(sc))
+            .collect();
+        // unlock
+        drop(cache);
+
 
         let msg = AcceptDecide {
             n,
