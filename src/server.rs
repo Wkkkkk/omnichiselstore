@@ -203,7 +203,14 @@ where
     }
 
     fn set_decided_idx(&mut self, ld: u64) {
-        
+        // ld might be smaller than self.ld which would cause panic while slicing
+        // ld might be bigger  than log.len which would cause panic while slicing
+        // TODO: Check ld before assign it
+        if  ld < self.ld || ld > self.log.len() as u64 {
+            println!("{:?} wishes to decide: {}, {}, {}", thread::current().id(), self.ld, ld, self.log.len());
+            return;
+        }
+
         let old_ld = self.ld;
         let new_ld = ld;
 
