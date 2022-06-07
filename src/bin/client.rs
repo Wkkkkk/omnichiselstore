@@ -17,12 +17,17 @@ async fn main() {
     }
     
     let file = File::open(&args[1]).expect("no such file");
-    let mut reader = BufReader::new(file);
+    let reader = BufReader::new(file);
 
     let replica_id: u64 = args[2].parse().unwrap();
+    let mut starting_point: usize = 0;
+    if args.len() == 4 {
+        starting_point = args[3].parse().unwrap();
+    }
 
     tokio::task::spawn(async move {
-        for line in reader.lines() {
+        for (i, line) in reader.lines().enumerate() {
+            if i < starting_point { continue; }
             let _res = query(replica_id, line.unwrap()).await.unwrap();
         }
     }).await.unwrap();
