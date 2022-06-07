@@ -23,6 +23,7 @@ use crate::boost::log;
 use crate::preprocessing::*;
 use lecar::controller::Controller;
 use std::time::Instant;
+use serde::{Serialize, Deserialize};
 
 #[allow(missing_docs)]
 pub mod proto {
@@ -105,6 +106,8 @@ pub struct RpcTransport {
     #[derivative(Debug = "ignore")]
     node_addr: Box<NodeAddrFn>,
     connections: Connections,
+    // cache
+    cache: Arc<Mutex<Controller>>
 }
 
 impl RpcTransport {
@@ -113,6 +116,7 @@ impl RpcTransport {
         RpcTransport {
             node_addr,
             connections: Connections::new(),
+            cache: Arc::new(Mutex::new(Controller::new(20, 10, 10)))
         }
     }
 }
@@ -295,19 +299,22 @@ impl StoreTransport for RpcTransport {
                     None => None,
                 };
 
-                let req = AcceptSyncReq {
-                    from,
-                    to,
-                    n,
-                    sync_item,
-                    sync_idx,
-                    decide_idx,
-                    stop_sign,
-                };
-
                 let peer = (self.node_addr)(to_id);
                 let pool = self.connections.clone();
+                let cache = self.cache.clone();
                 tokio::task::spawn(async move {
+                    let cache = cache.lock().await;
+                    let req = AcceptSyncReq {
+                        from,
+                        to,
+                        n,
+                        sync_item,
+                        sync_idx,
+                        decide_idx,
+                        stop_sign,
+                        cache: Some(serde_json::to_string(&*cache).unwrap())
+                    };
+
                     let mut client = pool.connection(peer).await;
                     let req = tonic::Request::new(req.clone());
                     client.conn.accept_sync(req).await.unwrap();
@@ -605,16 +612,13 @@ impl StoreTransport for RpcTransport {
 pub struct RpcService {
     /// The ChiselStore server access via this RPC service.
     #[derivative(Debug = "ignore")]
-    pub server: Arc<StoreServer<RpcTransport>>,
-    // cache
-    cache: Arc<Mutex<Controller>>
+    pub server: Arc<StoreServer<RpcTransport>>
 }
 
 impl RpcService {
     /// Creates a new RPC service.
     pub fn new(server: Arc<StoreServer<RpcTransport>>) -> Self {
-        Self { server,
-               cache: Arc::new(Mutex::new(Controller::new(200, 20, 20))) }
+        Self { server }
     }
 }
 
@@ -631,7 +635,7 @@ impl Rpc for RpcService {
 
         // split query
         let (template, parameters) = split_query(&query.sql);
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.server.transport.cache.lock().await;
         cache.counter.num_queries += 1;
         cache.counter.raw_messsages_size += query.sql.len() as u64;
 
@@ -680,6 +684,7 @@ impl Rpc for RpcService {
 
         let n = ballot_from_proto(msg.n.unwrap());
         let n_accepted = ballot_from_proto(msg.n_accepted.unwrap());
+        log(format!("{:?} received prepare from {:?}", to, from).to_string());
 
         let msg = Prepare {
             n,
@@ -707,7 +712,8 @@ impl Rpc for RpcService {
 
         let n = ballot_from_proto(msg.n.unwrap());
         let n_accepted = ballot_from_proto(msg.n_accepted.unwrap());
-        
+        log(format!("{:?} received promise from {:?}", to, from).to_string());
+
         let sync_item: Option<SyncItem<StoreCommand,()>> = match msg.sync_item {
             Some(si) => Some(sync_item_from_proto(si)),
             _ => None,
@@ -758,6 +764,14 @@ impl Rpc for RpcService {
             Some(ss) => Some(stopsign_from_proto(ss)),
             _ => None,
         };
+
+        log(format!("{:?} received accept_sync: {:?} from {:?}", to, msg.cache, from).to_string());
+        if let Some(cache) = msg.cache {
+            let cache: Controller = serde_json::from_str(&cache).unwrap();
+
+            *self.server.transport.cache.lock().await = cache;
+            log(format!("{:?} updated its cache", to).to_string());
+        }
 
         let msg = AcceptSync {
             n,
@@ -813,7 +827,7 @@ impl Rpc for RpcService {
         log(format!("{:?} is decoding entries: {:?}", thread::current().id(), msg.entries).to_string());
         let now = Instant::now();
 
-        let mut cache = self.cache.lock().await;
+        let mut cache = self.server.transport.cache.lock().await;
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;
         let entries = msg.entries

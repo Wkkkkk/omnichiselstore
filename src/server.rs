@@ -223,7 +223,7 @@ where
         }
 
         // commit decided transactions to DB
-        println!("{:?} decides: {}, {}, {}", thread::current().id(), old_ld, new_ld, self.log.len());
+        // println!("{:?} decides: {}, {}, {}", thread::current().id(), old_ld, new_ld, self.log.len());
         let queries_to_run = self.log[(old_ld as usize)..(new_ld as usize)].to_vec();
         
         for q in queries_to_run.iter() {
@@ -305,7 +305,7 @@ pub struct StoreServer<T: StoreTransport + Send + Sync> {
     sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore<()>>>>,
     #[derivative(Debug = "ignore")]
     ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
-    transport: T,
+    pub transport: T,
     query_results_holder: Arc<Mutex<QueryResultsHolder>>,
     halt: Arc<Mutex<bool>>,
 }
