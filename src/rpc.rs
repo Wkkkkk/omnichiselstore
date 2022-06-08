@@ -636,6 +636,8 @@ impl Rpc for RpcService {
         // split query
         let (template, parameters) = split_query(&query.sql);
         let mut cache = self.server.transport.cache.lock().await;
+        let len_tuple = cache.len();
+        cache.counter.size = (len_tuple.0 + len_tuple.1 + len_tuple.2) as u64;
         cache.counter.num_queries += 1;
         cache.counter.raw_messsages_size += query.sql.len() as u64;
 
@@ -656,7 +658,6 @@ impl Rpc for RpcService {
         let elapsed = now.elapsed();
         cache.counter.compressed_size += query.sql.len() as u64;
         cache.counter.compression_time += elapsed.as_millis() as u64;
-        cache.counter.try_write_to_file();
 
         let server = self.server.clone();
         let results = match server.query(query.sql).await {
@@ -665,7 +666,11 @@ impl Rpc for RpcService {
         };
 
         // update cache for leader
+        let now = Instant::now();
         cache.insert(&template, template.clone());
+        let elapsed = now.elapsed();
+        cache.counter.updating_time += elapsed.as_millis() as u64;
+        cache.counter.try_write_to_file();
 
         let mut rows = vec![];
         for row in results.rows {
