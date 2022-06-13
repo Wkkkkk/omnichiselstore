@@ -116,7 +116,7 @@ impl RpcTransport {
         RpcTransport {
             node_addr,
             connections: Connections::new(),
-            cache: Arc::new(Mutex::new(Controller::new(200, 20, 20)))
+            cache: Arc::new(Mutex::new(Controller::new(50, 10, 10)))
         }
     }
 }
