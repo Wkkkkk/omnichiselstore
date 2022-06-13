@@ -14,9 +14,10 @@ use omnipaxos_core::{
     ballot_leader_election::messages::BLEMessage,
     sequence_paxos::{SequencePaxos, SequencePaxosConfig},
     storage::{Storage, Snapshot, StopSignEntry},
-    messages::Message,
+    messages::{Message, StoreCommand},
 };
 use std::thread;
+use crate::boost::log;
 
 /// ChiselStore transport layer.
 ///
@@ -32,13 +33,13 @@ pub trait StoreTransport {
 /// Store command.
 ///
 /// A store command is a SQL statement that is replicated in the Raft cluster.
-#[derive(Clone, Debug)]
-pub struct StoreCommand {
-    /// Unique ID of this command.
-    pub id: u64,
-    /// The SQL statement of this command.
-    pub sql: String,
-}
+// #[derive(Clone, Debug)]
+// pub struct StoreCommand {
+//     /// Unique ID of this command.
+//     pub id: u64,
+//     /// The SQL statement of this command.
+//     pub sql: String,
+// }
 
 // Used for handling async queries
 // #[derive(Clone, Debug)]

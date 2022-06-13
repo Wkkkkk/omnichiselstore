@@ -1,7 +1,7 @@
 //! ChiselStore RPC module.
 
 use crate::rpc::proto::rpc_server::Rpc;
-use crate::{StoreCommand, StoreServer, StoreTransport};
+use crate::{StoreServer, StoreTransport};
 use async_mutex::Mutex;
 use async_trait::async_trait;
 use crossbeam::queue::ArrayQueue;
@@ -16,6 +16,7 @@ use omnipaxos_core::{
         Message, PaxosMsg, Prepare, Promise, AcceptSync, 
         FirstAccept, AcceptDecide, Accepted, Decide, 
         Compaction, AcceptStopSign, AcceptedStopSign, DecideStopSign,
+        StoreCommand
     },
     util::{SyncItem}
 };
@@ -106,8 +107,6 @@ pub struct RpcTransport {
     #[derivative(Debug = "ignore")]
     node_addr: Box<NodeAddrFn>,
     connections: Connections,
-    // cache
-    cache: Arc<Mutex<Controller>>
 }
 
 impl RpcTransport {
@@ -116,7 +115,6 @@ impl RpcTransport {
         RpcTransport {
             node_addr,
             connections: Connections::new(),
-            cache: Arc::new(Mutex::new(Controller::new(50, 10, 10)))
         }
     }
 }
@@ -299,22 +297,20 @@ impl StoreTransport for RpcTransport {
                     None => None,
                 };
 
+                let req = AcceptSyncReq {
+                    from,
+                    to,
+                    n,
+                    sync_item,
+                    sync_idx,
+                    decide_idx,
+                    stop_sign,
+                };
+
                 let peer = (self.node_addr)(to_id);
                 let pool = self.connections.clone();
-                let cache = self.cache.clone();
-                tokio::task::spawn(async move {
-                    let cache = cache.lock().await;
-                    let req = AcceptSyncReq {
-                        from,
-                        to,
-                        n,
-                        sync_item,
-                        sync_idx,
-                        decide_idx,
-                        stop_sign,
-                        cache: Some(serde_json::to_string(&*cache).unwrap())
-                    };
 
+                tokio::task::spawn(async move {
                     let mut client = pool.connection(peer).await;
                     let req = tonic::Request::new(req.clone());
                     client.conn.accept_sync(req).await.unwrap();
@@ -325,13 +321,13 @@ impl StoreTransport for RpcTransport {
                 let to = msg.to;
 
                 let n = Some(proto_from_ballot(first_accept.n));
-                let entries = first_accept.entries.into_iter().map(|e| proto_from_store_command(e)).collect();
+                // let entries = first_accept.entries.into_iter().map(|e| proto_from_store_command(e)).collect();
 
                 let req = FirstAcceptReq {
                     from,
                     to,
                     n,
-                    entries,
+                    // entries,
                 };
 
                 let peer = (self.node_addr)(to_id);
@@ -629,48 +625,13 @@ impl Rpc for RpcService {
         request: Request<Query>,
     ) -> Result<Response<QueryResults>, tonic::Status> {
         let mut query = request.into_inner();
-        //TODO: encode the command here
-        let now = Instant::now();
         log(format!("Rpc execute: {:?}", query).to_string());
-
-        // split query
-        let (template, parameters) = split_query(&query.sql);
-        let mut cache = self.server.transport.cache.lock().await;
-        let len_tuple = cache.len();
-        cache.counter.size = (len_tuple.0 + len_tuple.1 + len_tuple.2) as u64;
-        cache.counter.num_queries += 1;
-        cache.counter.raw_messsages_size += query.sql.len() as u64;
-
-        if let Some(index) = cache.get_index_of(&template) {
-            // exists in cache
-            // send index and parameters
-            let compressed = format!("1*|*{}*|*{}", index.to_string(), parameters);
-
-            query.sql = compressed;
-            cache.counter.hits += 1;
-        } else {
-            // send template and parameters
-            let uncompressed = format!("0*|*{}*|*{}", template, parameters);
-
-            query.sql = uncompressed;
-            cache.counter.misses += 1;
-        }
-        let elapsed = now.elapsed();
-        cache.counter.compressed_size += query.sql.len() as u64;
-        cache.counter.compression_time += elapsed.as_millis() as u64;
 
         let server = self.server.clone();
         let results = match server.query(query.sql).await {
             Ok(results) => results,
             Err(e) => return Err(Status::internal(format!("{}", e))),
         };
-
-        // update cache for leader
-        let now = Instant::now();
-        cache.insert(&template, template.clone());
-        let elapsed = now.elapsed();
-        cache.counter.updating_time += elapsed.as_millis() as u64;
-        cache.counter.try_write_to_file();
 
         let mut rows = vec![];
         for row in results.rows {
@@ -770,13 +731,13 @@ impl Rpc for RpcService {
             _ => None,
         };
 
-        log(format!("{:?} received accept_sync: {:?} from {:?}", to, msg.cache, from).to_string());
-        if let Some(cache) = msg.cache {
-            let cache: Controller = serde_json::from_str(&cache).unwrap();
+        // log(format!("{:?} received accept_sync: {:?} from {:?}", to, msg.cache, from).to_string());
+        // if let Some(cache) = msg.cache {
+        //     let cache: Controller = serde_json::from_str(&cache).unwrap();
 
-            *self.server.transport.cache.lock().await = cache;
-            log(format!("{:?} updated its cache", to).to_string());
-        }
+        //     *self.server.transport.cache.lock().await = cache;
+        //     log(format!("{:?} updated its cache", to).to_string());
+        // }
 
         let msg = AcceptSync {
             n,
@@ -804,11 +765,11 @@ impl Rpc for RpcService {
         let to = msg.to;
 
         let n = ballot_from_proto(msg.n.unwrap());
-        let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+        // let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
 
         let msg = FirstAccept {
             n,
-            entries,
+            // entries,
         };
 
         let msg = Message {
@@ -828,48 +789,12 @@ impl Rpc for RpcService {
         let from = msg.from;
         let to = msg.to;
 
-        //TODO: decode entries here
         log(format!("{:?} is decoding entries: {:?}", thread::current().id(), msg.entries).to_string());
-        let now = Instant::now();
 
-        let mut cache = self.server.transport.cache.lock().await;
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;
-        let entries = msg.entries
-            .into_iter()
-            .filter_map(|sc| {
-                let parts: Vec<&str> = sc.sql.split("*|*").collect();
-                if parts.len() != 3 { 
-                    log(format!("Unexpected query: {:?}", sc.sql).to_string());
-                    return None 
-                }
-
-                let (compressed, index_or_template, parameters) = (parts[0], parts[1].to_string(), parts[2].to_string());
-                let mut template = index_or_template.clone();
-
-                if compressed == "1" {
-                    // compressed messsage
-                    let index = index_or_template.parse::<usize>().unwrap();
-                    if let Some(cacheitem) = cache.get_index(index) {
-                        template = cacheitem.value().to_string();
-                    } else { 
-                        panic!("Out of index: {}", index);
-                    }
-                }
-                
-                // update cache for followers
-                cache.insert(&template, template.clone());
-                
-                let sql = merge_query(template, parameters);
-                Some(StoreCommand {id: sc.id, sql})
-            })
-            // .map(|sc| store_command_from_proto(sc))
-            .collect();
-        let elapsed = now.elapsed();
-        cache.counter.decompression_time += elapsed.as_millis() as u64;
-        // unlock
-        drop(cache);
-
+        let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
+        
         let msg = AcceptDecide {
             n,
             ld,

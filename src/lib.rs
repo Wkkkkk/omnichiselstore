@@ -101,6 +101,6 @@ pub mod preprocessing;
 pub mod util;
 
 pub use errors::StoreError;
-pub use server::StoreCommand;
+// pub use server::StoreCommand;
 pub use server::StoreServer;
 pub use server::StoreTransport;
