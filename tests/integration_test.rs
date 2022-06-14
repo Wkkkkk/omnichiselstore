@@ -107,25 +107,25 @@ async fn leader_crashes() {
     // START: test
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await; // wait for leader election
 
-    // create table
-    tokio::task::spawn(async {
-        query(1, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
-        query(1, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
-        query(1, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
-        query(1, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
-    }).await.unwrap();
-
-    
-    // kill leader
     let mut leader_idx = 0;
-    for (i, r) in replicas.iter().enumerate() {
+    for r in replicas.iter() {
         if r.is_leader() {
-            leader_idx = i;
+            leader_idx = r.get_id();
             break
         }
-    }
-    
-    let leader = replicas.remove(leader_idx);
+    }    
+    log(format!("Leader is node {}", leader_idx).to_string());
+
+    // create table
+    tokio::task::spawn(async move {
+        query(leader_idx, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+        query(leader_idx, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+        query(leader_idx, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+        query(leader_idx, String::from("CREATE TABLE IF NOT EXISTS test_leader_drop (id integer PRIMARY KEY)")).await.unwrap();
+    }).await.unwrap();
+
+    // kill leader
+    let leader = replicas.remove(leader_idx as usize);
     leader.shutdown().await;
 
     log(format!("Leader with idx {} dead", leader_idx).to_string());

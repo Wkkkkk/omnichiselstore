@@ -296,6 +296,7 @@ impl StoreTransport for RpcTransport {
                     },
                     None => None,
                 };
+                let cache = accept_sync.cache;
 
                 let req = AcceptSyncReq {
                     from,
@@ -305,6 +306,7 @@ impl StoreTransport for RpcTransport {
                     sync_idx,
                     decide_idx,
                     stop_sign,
+                    cache
                 };
 
                 let peer = (self.node_addr)(to_id);
@@ -731,13 +733,8 @@ impl Rpc for RpcService {
             _ => None,
         };
 
-        // log(format!("{:?} received accept_sync: {:?} from {:?}", to, msg.cache, from).to_string());
-        // if let Some(cache) = msg.cache {
-        //     let cache: Controller = serde_json::from_str(&cache).unwrap();
-
-        //     *self.server.transport.cache.lock().await = cache;
-        //     log(format!("{:?} updated its cache", to).to_string());
-        // }
+        let cache = msg.cache;
+        log(format!("{:?} received accept_sync: {:?} from {:?}", to, cache, from).to_string());
 
         let msg = AcceptSync {
             n,
@@ -745,6 +742,7 @@ impl Rpc for RpcService {
             sync_idx,
             decide_idx,
             stopsign,
+            cache
         };
 
         let msg = Message {
