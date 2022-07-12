@@ -75,7 +75,7 @@ impl QueryResultsHolder {
 
 /// Store configuration.
 #[derive(Debug)]
-struct StoreConfig {
+pub struct StoreConfig {
     /// Connection pool size.
     conn_pool_size: usize,
     query_results_holder: Arc<Mutex<QueryResultsHolder>>,
@@ -84,7 +84,7 @@ struct StoreConfig {
 #[derive(Clone)]
 #[derive(Derivative)]
 #[derivative(Debug)]
-struct SQLiteStore<S>
+pub struct SQLiteStore<S>
 where
     S: Snapshot<StoreCommand>,
 {
@@ -303,7 +303,7 @@ pub struct StoreServer<T: StoreTransport + Send + Sync> {
     this_id: u64,
     next_cmd_id: AtomicU64,
     #[derivative(Debug = "ignore")]
-    sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore<()>>>>,
+    pub sequence_paxos: Arc<Mutex<SequencePaxos<StoreCommand, (), SQLiteStore<()>>>>,
     #[derivative(Debug = "ignore")]
     ballot_leader_election: Arc<Mutex<BallotLeaderElection>>,
     pub transport: T,
