@@ -4,6 +4,7 @@ use std::{
     env,
     fs::File,
     io::{prelude::*, BufReader},
+    time::Instant,
 };
 
 use tokio::main;
@@ -25,12 +26,15 @@ async fn main() {
         starting_point = args[3].parse().unwrap();
     }
 
+    let now = Instant::now();
     tokio::task::spawn(async move {
         for (i, line) in reader.lines().enumerate() {
             if i < starting_point { continue; }
             let _res = query(replica_id, line.unwrap()).await.unwrap();
         }
     }).await.unwrap();
+    let elapsed = now.elapsed();
+    let time_to_finish_workload = elapsed.as_secs() as u64;
 
-    println!("all queries are done");
+    println!("all queries are done in {} seconds", time_to_finish_workload);
 }
