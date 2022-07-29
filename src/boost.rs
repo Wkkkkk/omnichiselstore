@@ -32,11 +32,12 @@ pub fn log(s: String) {
 
 /// Node authority (host and port) in the cluster.
 pub fn node_authority(id: u64) -> (&'static str, u16) {
-    let hosts = vec!["127.0.0.1", // local host 
-                     "34.127.15.38", 
+    let hosts = vec!["127.0.0.1", // local test 
+                     "35.197.67.250", 
                      "34.118.45.186",
-                     "104.198.64.213"];
+                     "34.171.20.66"];
     let host = hosts[id as usize];
+    // let host = hosts[0];
 
     let port = 50000 + (id as u16);
     (host, port)
@@ -86,7 +87,7 @@ impl Replica {
 
 pub async fn start_replica(id: u64, peers: Vec<u64>) -> Replica {
     let (host, port) = node_authority(id);
-    let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
+    let rpc_listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
     let transport = RpcTransport::new(Box::new(node_rpc_addr));
     let server = StoreServer::start(id, peers, transport).unwrap();
     let server = Arc::new(server);

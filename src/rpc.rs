@@ -68,6 +68,7 @@ impl ConnectionPool {
 
     async fn connection<S: ToString>(&self, addr: S) -> RpcClient<tonic::transport::Channel> {
         let addr = addr.to_string();
+        // log(format!("Connecting to {}", addr).to_string());
         match self.connections.pop() {
             Some(x) => x,
             None => RpcClient::connect(addr).await.unwrap(),
