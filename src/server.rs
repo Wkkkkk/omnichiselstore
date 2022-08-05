@@ -435,10 +435,11 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
             let mut ballot_leader_election = self.ballot_leader_election.lock().unwrap();
 
-            if let Some(leader) = ballot_leader_election.tick() {
-                // a new leader is elected, pass it to SequencePaxos.
-                sequence_paxos.handle_leader(leader);
-            }
+            // if let Some(leader) = ballot_leader_election.tick() {
+            //     // a new leader is elected, pass it to SequencePaxos.
+            //     sequence_paxos.handle_leader(leader);
+            // }
+            sequence_paxos.handle_leader(Ballot::with(0, 0, 1));
         }
     }
 
