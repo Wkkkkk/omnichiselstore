@@ -33,9 +33,9 @@ pub fn log(s: String) {
 /// Node authority (host and port) in the cluster.
 pub fn node_authority(id: u64) -> (&'static str, u16) {
     let hosts = vec!["127.0.0.1", // local test 
-                     "34.145.9.224",
                      "34.171.9.222",
-                     "34.67.30.213"];
+                     "34.67.30.213",
+                     "34.172.39.56"];
     let host = hosts[id as usize];
     // let host = hosts[0];
 
