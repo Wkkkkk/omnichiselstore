@@ -630,14 +630,6 @@ impl Rpc for RpcService {
         let mut query = request.into_inner();
         log(format!("Rpc execute: {:?}", query).to_string());
 
-        {
-            use prost::Message;
-            let raw_len = query.encoded_len();
-            let mut sequence_paxos = self.server.sequence_paxos.lock().unwrap();
-            let counter = &mut sequence_paxos.cache.counter;
-            counter.raw_len += raw_len as u64;            
-        }
-
         let server = self.server.clone();
         let results = match server.query(query.sqls).await {
             Ok(results) => results,
@@ -795,19 +787,6 @@ impl Rpc for RpcService {
         let msg = request.into_inner();
         let from = msg.from;
         let to = msg.to;
-
-        {
-            use prost::Message;
-            let encoded_len = msg.encoded_len();
-            let mut sequence_paxos = self.server.sequence_paxos.lock().unwrap();
-            let counter = &mut sequence_paxos.cache.counter;
-            counter.num_queries += 1;
-            counter.encoded_len += encoded_len as u64;
-            log(format!("{:?}  of size {} is decoding entries: {:?}", thread::current().id(), encoded_len, msg.entries).to_string());    
-            
-            let path = format!("follower_{}_counter_logs.txt", msg.to);
-            counter.try_write_to_file(&path);
-        }
 
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;
