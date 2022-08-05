@@ -371,7 +371,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Run the blocking event loop.
     pub async fn run_message_loop(&self) {
         loop {
-            sleep(Duration::from_millis(MESSAGE_LOOP_TIMEOUT_MS)).await;
+            // sleep(Duration::from_millis(MESSAGE_LOOP_TIMEOUT_MS)).await;
 
             if *self.halt.lock().unwrap() {
                 break
