@@ -49,13 +49,14 @@ async fn main() {
         if has_run > maximum_runtime { break };
 
         let start = Instant::now();
+        let batch_size = batch.size();
 
         let _result = query(replica_id, batch.to_vec()).await.unwrap();
 
         let end = start.elapsed();
         let time_in_millis = end.as_millis() as u64;
-        let throughput = 1000 * chunk_size as u64 / time_in_millis;
-        println!("batch_size: {}, throughput: {}, time_in_millis: {} \n", chunk_size, throughput, time_in_millis);
+        let throughput = 1000 * batch_size as u64 / time_in_millis;
+        println!("batch_size: {}, throughput: {}, time_in_millis: {} \n", batch_size, throughput, time_in_millis);
         let output_str = format!("{}, {}, {} \n", chunk_size, throughput, time_in_millis);
         f.write_all(output_str.as_bytes()).expect("Unable to write data");
     }
