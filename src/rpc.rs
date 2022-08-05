@@ -788,6 +788,13 @@ impl Rpc for RpcService {
         let from = msg.from;
         let to = msg.to;
 
+        {
+            use prost::Message;
+            let encoded_len = msg.encoded_len();
+
+            log(format!("{:?}  of size {} is decoding entries: {:?}", thread::current().id(), encoded_len, msg.entries).to_string());    
+        }
+
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;
         let entries = msg.entries.into_iter().map(|sc| store_command_from_proto(sc)).collect();
