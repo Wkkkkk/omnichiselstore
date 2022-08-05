@@ -49,7 +49,7 @@ async fn main() {
         if has_run > maximum_runtime { break };
 
         let start = Instant::now();
-        let batch_size = batch.size();
+        let batch_size = batch.len();
 
         let _result = query(replica_id, batch.to_vec()).await.unwrap();
 

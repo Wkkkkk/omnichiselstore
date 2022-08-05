@@ -7,5 +7,5 @@ done
 
 for BATCH_SIZE in 5000 10000 20000 50000 100000; do
   # run a fixed time
-  ./target/release/client datasets/queries.txt 1 $BATCH_SIZE 60*3
+  ./target/release/client datasets/queries.txt 1 $BATCH_SIZE 180
 done
