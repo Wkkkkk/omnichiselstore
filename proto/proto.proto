@@ -31,7 +31,7 @@ message Void {
 }
 
 message Query {
-    string sql = 1;
+    repeated string sqls = 1;
 }
 
 message QueryResults {

@@ -446,32 +446,36 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Execute a SQL statement on the ChiselStore cluster.
     pub async fn query<S: AsRef<str>>(
         &self,
-        stmt: S,
+        stmts: Vec<S>,
     ) -> Result<QueryResults, StoreError> {
-        let results = {
-            let (notify, id) = {
-                let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
-                let cmd = StoreCommand {
-                    id: id,
-                    sql: stmt.as_ref().to_string(),
+        let mut rows = vec![];
+        let mut results = QueryResults { rows };
+        for stmt in stmts {
+            results = {
+                let (notify, id) = {
+                    let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
+                    let cmd = StoreCommand {
+                        id: id,
+                        sql: stmt.as_ref().to_string(),
+                    };
+                    
+                    let notify = Arc::new(Notify::new());
+
+                    let mut query_results_holder = self.query_results_holder.lock().unwrap();
+                    query_results_holder.insert_notifier(id, notify.clone());
+                    
+                    let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
+                    sequence_paxos.append(cmd).expect("Failed to append");
+                    
+                    (notify, id)
                 };
-                
-                let notify = Arc::new(Notify::new());
 
-                let mut query_results_holder = self.query_results_holder.lock().unwrap();
-                query_results_holder.insert_notifier(id, notify.clone());
-                
-                let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
-                sequence_paxos.append(cmd).expect("Failed to append");
-                
-                (notify, id)
+                // wait for append (and decide) to finish in background
+                notify.notified().await;
+                let results = self.query_results_holder.lock().unwrap().remove_result(&id).unwrap();
+                results?
             };
-
-            // wait for append (and decide) to finish in background
-            notify.notified().await;
-            let results = self.query_results_holder.lock().unwrap().remove_result(&id).unwrap();
-            results?
-        };
+        }
         Ok(results)
     }
 

@@ -159,7 +159,7 @@ pub async fn shutdown_replicas(mut replicas: Vec<Replica>) {
     }
 }
 
-pub async fn query(replica_id: u64, sql: String) -> Result<String, Box<dyn Error>> {
+pub async fn query(replica_id: u64, sqls: Vec<String>) -> Result<String, Box<dyn Error>> {
     // create RPC client
     let addr = node_rpc_addr(replica_id);
     let mut client = RpcClient::connect(addr).await.unwrap();
@@ -167,7 +167,7 @@ pub async fn query(replica_id: u64, sql: String) -> Result<String, Box<dyn Error
     // create request
     // log(format!("execute query: {}", sql));
     let query = tonic::Request::new(Query {
-        sql: sql,
+        sqls: sqls,
     });
 
     // execute request

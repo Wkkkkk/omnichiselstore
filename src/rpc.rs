@@ -639,7 +639,7 @@ impl Rpc for RpcService {
         }
 
         let server = self.server.clone();
-        let results = match server.query(query.sql).await {
+        let results = match server.query(query.sqls).await {
             Ok(results) => results,
             Err(e) => return Err(Status::internal(format!("{}", e))),
         };
