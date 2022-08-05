@@ -25,8 +25,12 @@ async fn main() {
 
     let replica_id: u64 = args[2].parse().unwrap();
     let mut chunk_size: usize = 1;
-    if args.len() == 4 {
+    if args.len() >= 4 {
         chunk_size = args[3].parse().unwrap();
+    }
+    let mut maximum_runtime: u64 = 60 * 30; 
+    if args.len() >= 5 {
+        maximum_runtime = args[4].parse().unwrap();
     }
 
     let mut f = OpenOptions::new()
@@ -40,6 +44,10 @@ async fn main() {
                         .collect::<Vec<_>>();
 
     for batch in all_lines.chunks(chunk_size) {
+        let elapsed = now.elapsed();
+        let has_run = elapsed.as_secs() as u64;
+        if has_run > maximum_runtime { break };
+
         let start = Instant::now();
 
         let _result = query(replica_id, batch.to_vec()).await.unwrap();
