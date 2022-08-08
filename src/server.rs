@@ -18,6 +18,7 @@ use omnipaxos_core::{
 };
 use std::thread;
 use crate::boost::log;
+use futures::future::join_all;
 
 /// ChiselStore transport layer.
 ///
@@ -371,7 +372,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     /// Run the blocking event loop.
     pub async fn run_message_loop(&self) {
         loop {
-            // sleep(Duration::from_millis(MESSAGE_LOOP_TIMEOUT_MS)).await;
+            sleep(Duration::from_micros(MESSAGE_LOOP_TIMEOUT_MS)).await;
 
             if *self.halt.lock().unwrap() {
                 break
@@ -450,8 +451,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
     ) -> Result<QueryResults, StoreError> {
         let mut rows = vec![];
         let mut results = QueryResults { rows };
+        let mut notifies = Vec::new();
         for stmt in stmts {
-            results = {
+            // results = {
                 let (notify, id) = {
                     let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
                     let cmd = StoreCommand {
@@ -469,13 +471,18 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                     
                     (notify, id)
                 };
-
+                
+                notifies.push(notify.clone());
                 // wait for append (and decide) to finish in background
-                notify.notified().await;
-                let results = self.query_results_holder.lock().unwrap().remove_result(&id).unwrap();
-                results?
-            };
+                // notify.notified().await;
+                // let results = self.query_results_holder.lock().unwrap().remove_result(&id).unwrap();
+                // results?
+            // };
         }
+        for notify in &notifies {
+                notify.notified().await;
+        }
+
         Ok(results)
     }
 
