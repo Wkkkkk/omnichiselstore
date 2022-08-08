@@ -628,7 +628,7 @@ impl Rpc for RpcService {
         request: Request<Query>,
     ) -> Result<Response<QueryResults>, tonic::Status> {
         let mut query = request.into_inner();
-        log(format!("Rpc execute: {:?}", query).to_string());
+        // log(format!("Rpc execute: {:?}", query).to_string());
 
         let server = self.server.clone();
         let results = match server.query(query.sqls).await {

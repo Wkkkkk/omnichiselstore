@@ -54,10 +54,10 @@ async fn main() {
         let _result = query(replica_id, batch.to_vec()).await.unwrap();
 
         let end = start.elapsed();
-        let time_in_millis = end.as_millis() as u64;
-        let throughput = 1000 * batch_size as u64 / time_in_millis;
-        println!("batch_size: {}, throughput: {}, time_in_millis: {} \n", batch_size, throughput, time_in_millis);
-        let output_str = format!("{}, {}, {} \n", chunk_size, throughput, time_in_millis);
+        let time_in_micros = end.as_micros() as u64;
+        let throughput = 1000000 * batch_size as u64 / time_in_micros;
+        println!("batch_size: {}, throughput: {}, time_in_micros: {} \n", batch_size, throughput, time_in_micros);
+        let output_str = format!("{}, {}, {} \n", chunk_size, throughput, time_in_micros);
         f.write_all(output_str.as_bytes()).expect("Unable to write data");
     }
 
