@@ -452,9 +452,9 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         let mut rows = vec![];
         let mut results = QueryResults { rows };
         let mut notifies = Vec::new();
-        // let mut futures = Vec::new();
-        for stmt in stmts {
-            // results = {
+        {
+            let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
+            for stmt in stmts {
                 let (notify, id) = {
                     let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
                     let cmd = StoreCommand {
@@ -467,24 +467,19 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                     let mut query_results_holder = self.query_results_holder.lock().unwrap();
                     query_results_holder.insert_notifier(id, notify.clone());
                     
-                    let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
                     sequence_paxos.append(cmd).expect("Failed to append");
                     
                     (notify, id)
                 };
                 
                 notifies.push(notify.clone());
-                // futures.push(async move { notify.notified().await });
-                // wait for append (and decide) to finish in background
-                // notify.notified().await;
-                // let results = self.query_results_holder.lock().unwrap().remove_result(&id).unwrap();
-                // results?
-            // };
+            }
         }
+        
+        // wait for append (and decide) to finish in background
         for notify in &notifies {
-                notify.notified().await;
+            notify.notified().await;
         }
-        // join_all(futures).await;
 
         Ok(results)
     }
