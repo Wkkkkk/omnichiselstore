@@ -628,7 +628,7 @@ impl Rpc for RpcService {
         request: Request<Query>,
     ) -> Result<Response<QueryResults>, tonic::Status> {
         let mut query = request.into_inner();
-        log(format!("Rpc execute: {:?}", query).to_string());
+        // log(format!("Rpc execute: {:?}", query).to_string());
 
         let server = self.server.clone();
         let results = match server.query(query.sqls).await {
@@ -788,12 +788,12 @@ impl Rpc for RpcService {
         let from = msg.from;
         let to = msg.to;
 
-        {
-            use prost::Message;
-            let encoded_len = msg.encoded_len();
+        // {
+        //     use prost::Message;
+        //     let encoded_len = msg.encoded_len();
 
-            log(format!("{:?}  of size {} is decoding entries: {:?}", thread::current().id(), encoded_len, msg.entries).to_string());    
-        }
+        //     log(format!("{:?}  of size {} is decoding entries: {:?}", thread::current().id(), encoded_len, msg.entries).to_string());    
+        // }
 
         let n = ballot_from_proto(msg.n.unwrap());
         let ld = msg.ld;

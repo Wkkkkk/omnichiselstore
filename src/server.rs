@@ -452,7 +452,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         let mut rows = vec![];
         let mut results = QueryResults { rows };
         let mut notifies = Vec::new();
-        let mut futures = Vec::new();
+        // let mut futures = Vec::new();
         for stmt in stmts {
             // results = {
                 let (notify, id) = {
@@ -474,17 +474,17 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                 };
                 
                 notifies.push(notify.clone());
-                futures.push(async move { notify.notified().await });
+                // futures.push(async move { notify.notified().await });
                 // wait for append (and decide) to finish in background
                 // notify.notified().await;
                 // let results = self.query_results_holder.lock().unwrap().remove_result(&id).unwrap();
                 // results?
             // };
         }
-        // for notify in &notifies {
-        //         notify.notified().await;
-        // }
-        join_all(futures).await;
+        for notify in &notifies {
+                notify.notified().await;
+        }
+        // join_all(futures).await;
 
         Ok(results)
     }
