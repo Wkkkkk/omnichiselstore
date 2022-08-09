@@ -36,8 +36,8 @@ pub fn node_authority(id: u64) -> (&'static str, u16) {
                      "104.198.179.49",
                      "34.70.40.236",
                      "34.69.137.189"];
-    let host = hosts[id as usize];
-    // let host = hosts[0];
+    // let host = hosts[id as usize];
+    let host = hosts[0];
 
     let port = 50000 + (id as u16);
     (host, port)
