@@ -228,6 +228,7 @@ where
         // println!("{:?} decides: {}, {}, {}", thread::current().id(), old_ld, new_ld, self.log.len());
         let queries_to_run = self.log[(old_ld as usize)..(new_ld as usize)].to_vec();
         
+        println!("decide");
         for q in queries_to_run.iter() {
             let conn = self.get_connection();
             let results = skip_query(conn, q.sql.clone());
@@ -452,8 +453,10 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
         let mut rows = vec![];
         let mut results = QueryResults { rows };
         let mut notifies = Vec::new();
+        println!("query");
         {
             let mut sequence_paxos = self.sequence_paxos.lock().unwrap();
+            println!("iterating");
             for stmt in stmts {
                 let (notify, id) = {
                     let id = self.next_cmd_id.fetch_add(1, Ordering::SeqCst);
@@ -467,6 +470,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
                     let mut query_results_holder = self.query_results_holder.lock().unwrap();
                     query_results_holder.insert_notifier(id, notify.clone());
                     
+                    println!("appending");
                     sequence_paxos.append(cmd).expect("Failed to append");
                     
                     (notify, id)
@@ -476,6 +480,7 @@ impl<T: StoreTransport + Send + Sync> StoreServer<T> {
             }
         }
         
+        println!("wait to finish");
         // wait for append (and decide) to finish in background
         for notify in &notifies {
             notify.notified().await;
